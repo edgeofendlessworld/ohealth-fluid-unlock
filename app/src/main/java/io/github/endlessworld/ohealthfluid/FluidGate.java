@@ -51,10 +51,47 @@ final class FluidGate {
     }
 
     static void install(ClassLoader cl, XposedInterface xp) {
+        // 该拦截最彻底：直接替换 loadData 的结果，其它 hook 作为补充
+        hookLoadData(cl, xp);
         hookSwitches(cl, xp);
         hookTransport(cl, xp);
         hookUmsProvider(cl, xp);
         hookNetwork(cl, xp);
+    }
+
+    // ------------------------------------------------------------------
+    // 0. 决定性拦截：直接接管 FluidViewModel.loadData 的返回值
+    // ------------------------------------------------------------------
+
+    /**
+     * {@code loadData(SavedStateHandle, Continuation)} 是 suspend 方法。
+     * 直接返回 UI 数据对象即可（非 COROUTINE_SUSPENDED 时 Kotlin 状态机会同步取值），
+     * 从而完全绕过 UMS Provider / 手表 AIDL / 网络判定。
+     */
+    private static void hookLoadData(ClassLoader cl, XposedInterface xp) {
+        try {
+            final Class<?> vm = Class.forName(
+                    "com.heytap.health.watch.notification.impl.ui.FluidViewModel", false, cl);
+            final Class<?> handle = Class.forName("androidx.lifecycle.SavedStateHandle", false, cl);
+            final Class<?> cont = Class.forName("kotlin.coroutines.Continuation", false, cl);
+
+            final Method loadData = vm.getDeclaredMethod("loadData", handle, cont);
+            loadData.setAccessible(true);
+
+            xp.hook(loadData).intercept(chain -> {
+                final Object uiData = FluidUiFactory.build(cl);
+                if (uiData != null) {
+                    Log.i(TAG, "[GATE] FluidViewModel#loadData -> injected FluidUiData");
+                    return uiData;
+                }
+                // 构造失败时退回原实现，至少保留原有行为便于排查
+                Log.w(TAG, "loadData: inject failed, falling back to original");
+                return chain.proceed();
+            });
+            Log.i(TAG, "hooked loadData : FluidViewModel#loadData (decisive)");
+        } catch (Throwable t) {
+            Log.i(TAG, "SKIP FluidViewModel#loadData: " + t.getClass().getSimpleName());
+        }
     }
 
     // ------------------------------------------------------------------
@@ -182,23 +219,30 @@ final class FluidGate {
             call.setAccessible(true);
 
             xp.hook(call).intercept(chain -> {
+                // 注意：call() 是系统核心方法，本进程内所有 Provider 调用都会经过这里。
+                // 因此先用最廉价的方式（引用比较）快速排除绝大多数无关调用，
+                // 只有方法名匹配时才去解析 authority。
                 final Object uriArg = chain.getArg(0);
                 final Object methodArg = chain.getArg(1);
 
-                if (uriArg instanceof Uri
-                        && UMS_AUTHORITY.equals(((Uri) uriArg).getAuthority())
-                        && UMS_METHOD.equals(methodArg)) {
-
-                    final Bundle reply = new Bundle();
-                    reply.putString(UMS_RESULT_KEY, FakeData.brandListJson(cl));
-                    if (!brandListLoggedOnce) {
-                        brandListLoggedOnce = true;
-                        Log.i(TAG, "[GATE] ContentResolver.call(" + UMS_AUTHORITY
-                                + "#" + UMS_METHOD + ") -> injecting fake brand list");
-                    }
-                    return reply;
+                if (UMS_METHOD != methodArg && !UMS_METHOD.equals(methodArg)) {
+                    return chain.proceed();
                 }
-                return chain.proceed();
+                if (!(uriArg instanceof Uri)) {
+                    return chain.proceed();
+                }
+                if (!UMS_AUTHORITY.equals(((Uri) uriArg).getAuthority())) {
+                    return chain.proceed();
+                }
+
+                final Bundle reply = new Bundle();
+                reply.putString(UMS_RESULT_KEY, FakeData.brandListJson(cl));
+                if (!brandListLoggedOnce) {
+                    brandListLoggedOnce = true;
+                    Log.i(TAG, "[GATE] ContentResolver.call(" + UMS_AUTHORITY
+                            + "#" + UMS_METHOD + ") -> injecting fake brand list");
+                }
+                return reply;
             });
             Log.i(TAG, "hooked provider  : ContentResolver#call (ums.settings)");
         } catch (Throwable t) {
