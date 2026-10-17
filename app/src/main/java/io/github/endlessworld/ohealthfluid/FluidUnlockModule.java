@@ -60,6 +60,12 @@ public final class FluidUnlockModule extends XposedModule {
         // 方案 A：解锁「设备 → 通知 → 流体云」设置页
         FluidGate.install(cl, this);
 
+        // 兜住因 ColorOS 组件缺失导致的跳转崩溃
+        CrashGuard.install(cl, this);
+
+        // 方案 A 第二步：把白名单应用的通知桥接成流体云卡片
+        NotificationBridge.install(cl, this);
+
         log(Log.INFO, TAG, "hook installation finished; watch for [GATE]/[OBS] lines");
         log(Log.INFO, TAG, "==================================================");
     }
