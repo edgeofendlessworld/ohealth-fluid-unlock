@@ -40,6 +40,27 @@ final class FluidInjector {
     /** {@code normalizeFluidBundle} 未指定时使用的默认文案 key。 */
     private static final String DEFAULT_C = "DEFAULT_C";
 
+    /**
+     * 文本层级常量。
+     *
+     * <p>这些字符串会经 {@code TextBean} → protobuf {@code TextElement.setLevel()}
+     * <b>原样下发到手表格件</b>，固件据此决定把文本放进哪个槽位。
+     * 用错层级的后果是"岛存在但内容全空"。
+     *
+     * <p>取值来自 {@code CardDataBuilderHelper.extractAndValidateTitleDes}：
+     * <ul>
+     *   <li>标题：{@code B1}（备选 {@code externalTitle}）</li>
+     *   <li>正文：{@code C1}</li>
+     *   <li>副标题：{@code externalSubTitle} / {@code subTitle1} / {@code subTitle2}</li>
+     * </ul>
+     *
+     * <p>注意：{@code D1} / {@code A1} 是<b>图片</b>层级（{@code pickLargeIcon} 用），
+     * 不是文本层级，混用会导致文本不显示。
+     */
+    private static final String LEVEL_TITLE = "B1";
+    private static final String LEVEL_CONTENT = "C1";
+    private static final String LEVEL_SUBTITLE = "subTitle1";
+
     private FluidInjector() {
     }
 
@@ -92,13 +113,23 @@ final class FluidInjector {
     private static Bundle buildExtras(ClassLoader cl, String pkg, String title, String text) {
         final Bundle fluidData = new Bundle();
 
-        // fluid_texts：parseTextItems 从中读取并构造 TextBean
-        final ArrayList<Bundle> textItems = new ArrayList<>(2);
+        // fluid_texts：parseTextItems 从中读取并构造 TextBean，
+        // 层级必须用文本语义名（B1 = 标题 / C1 = 正文），否则手表拿到空槽位。
+        final ArrayList<Bundle> textItems = new ArrayList<>(3);
 
-        // 第一条：正文（D1 层级 = 主内容）
-        textItems.add(textItem("D1", text));
-        // 第二条：标题（A1 层级 = 副标题位）
-        textItems.add(textItem("A1", title));
+        // 标题
+        if (title != null && !title.isEmpty()) {
+            textItems.add(textItem(LEVEL_TITLE, title));
+        }
+        // 正文
+        if (text != null && !text.isEmpty()) {
+            textItems.add(textItem(LEVEL_CONTENT, text));
+        }
+        // 正文缺失时用标题兜底，避免整张卡片没有可显示内容
+        if (textItems.isEmpty()) {
+            textItems.add(textItem(LEVEL_CONTENT, pkg));
+        }
+
         fluidData.putParcelableArrayList("fluid_texts", textItems);
 
         final Bundle extras = new Bundle();
@@ -110,6 +141,10 @@ final class FluidInjector {
 
         // 默认文案（normalizeFluidBundle 读取，缺失时回落"流体云样例"）
         extras.putString(DEFAULT_C, title == null ? "" : title);
+
+        Log.i(TAG, "[INJECT] extras: pkg=" + pkg
+                + ", texts=" + textItems.size()
+                + " (" + LEVEL_TITLE + "=" + title + ", " + LEVEL_CONTENT + "=" + text + ")");
 
         return extras;
     }
