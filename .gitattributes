@@ -1,0 +1,8 @@
+# 统一按 LF 存储，避免 Windows 上检出时把 shell/YAML/Gradle 脚本改成 CRLF
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jar binary
+*.jks binary
+*.keystore binary
