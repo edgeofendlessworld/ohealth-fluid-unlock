@@ -57,6 +57,9 @@ public final class FluidUnlockModule extends XposedModule {
         hookGates(cl);
         hookObservers(cl);
 
+        // 方案 A：解锁「设备 → 通知 → 流体云」设置页
+        FluidGate.install(cl, this);
+
         log(Log.INFO, TAG, "hook installation finished; watch for [GATE]/[OBS] lines");
         log(Log.INFO, TAG, "==================================================");
     }
