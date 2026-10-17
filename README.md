@@ -90,7 +90,20 @@ FluidConfigCenter.getSupportApp(dataSourcePkgName);   // null 就 return false
 | `com.oplus.seedling.sdk.SeedlingSdk` | `isSupportFluidCloud(Context)` → `true` |
 | `com.oplus.pantanal.seedling.util.SeedlingTool` | `isSupportFluidCloud(Context)` → `true` |
 | `com.heytap.health.watch.notification.NotificationBaseAbility$Info` | `isSupportFluid()` / `isSupportSecondFluid()` → `true`，`isDeviceSupportFluid()` → `1` |
-| `com.heytap.health.watch.notification.impl.ability.NotificationAbility$Info` | 同上（接口默认方法被覆写时的兜底） |
+| `NotificationAbility$Info` 等 deviceability 实现类 | 同样三项，按方法名容错匹配 |
+| `FluidManager` | **兜底**：`init()` 返回后把 `supportFluid` 字段强制置 `true` |
+
+### 容错设计
+
+不同 ROM / 版本覆写能力判定的类并不一致，因此：
+
+- 类不存在 → `SKIP (absent)`，INFO 级，不是错误；
+- 方法不存在 → 先按**精确签名**找，失败再按**方法名**匹配同名重载，仍失败则 `SKIP (not declared)`；
+- 最终由 `FluidManager.supportFluid` 字段兜底，不依赖任何单个判定方法被命中。
+
+> 早期版本曾对 `NotificationAbility$Info#isSupportSecondFluid` 报 `NoSuchMethodException`——
+> 该方法只在接口 `NotificationBaseAbility$Info` 中声明，实现类并未覆写。
+> 现已改为容错查找，此类情况不会再报错。
 
 ### 探针 Hook（`[OBS]` 日志）
 
