@@ -1,0 +1,73 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Assemble release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+          cache-read-only: false
+
+      - name: Generate signing keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore "$GITHUB_WORKSPACE/keystore.jks" \
+            -alias ohealth \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android -keypass android \
+            -dname "CN=OHealth Fluid Unlock, OU=Dev, O=GitHub Actions, L=NA, ST=NA, C=CN"
+
+      - name: Build release APK
+        env:
+          KEYSTORE_FILE: ${{ github.workspace }}/keystore.jks
+          KEYSTORE_PASSWORD: android
+          KEY_ALIAS: ohealth
+          KEY_PASSWORD: android
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Verify APK contains libxposed manifests
+        run: |
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)
+          echo "APK = $APK"
+          unzip -l "$APK" | grep -E 'META-INF/xposed/' || {
+            echo "::error::APK 内缺少 META-INF/xposed/ 清单，模块不会被框架识别"
+            exit 1
+          }
+          ls -lh "$APK"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohealth-fluid-unlock-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/apk/release/*.apk
+          generate_release_notes: true

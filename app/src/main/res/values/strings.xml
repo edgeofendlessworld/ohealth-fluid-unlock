@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="module_name">OHealth Fluid Unlock</string>
+    <string name="module_description">解除 OPPO 健康流体云的环境判定闸门，并输出数据流探针日志。仅用于支持流体云的 OPPO 设备上做通道验证。</string>
+</resources>

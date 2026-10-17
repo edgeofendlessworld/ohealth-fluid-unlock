@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:allowBackup="false"
+        android:description="@string/module_description"
+        android:hasCode="true"
+        android:label="@string/module_name"
+        android:supportsRtl="true">
+
+        <!--
+          libxposed API 102 的模块元数据来自 android:label / android:description
+          以及 META-INF/xposed/module.prop，不再依赖下面的传统 meta-data。
+          这里保留传统 meta-data 仅为让 LSPosed 的模块列表能正确识别并显示本模块。
+        -->
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="@string/module_description" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="93" />
+    </application>
+
+</manifest>
