@@ -302,7 +302,7 @@ final class FluidInjector {
         final byte[] icon = appIconPng(pkg);
         // A1 同时也是桌面指示窗里的「方位」图标，这里放方向箭头而不是 App 图标
         final byte[] arrow = probeType == null
-                ? turnArrowPng(effTitle + " " + effText, distanceText(effTitle, effText))
+                ? turnArrowPng(effTitle + " " + effText)
                 : null;
         if (icon != null || arrow != null) {
             final ArrayList<Bundle> imageItems = new ArrayList<>(2);
@@ -580,11 +580,11 @@ final class FluidInjector {
      * 方向词自己画一个：直行 / 左转 / 右转 / 左前右前 / 掉头。
      * 尺寸取 120，与 {@code getDefaultImageBean} 里原生的图标宽度一致。
      *
-     * <p>有距离时把距离一起画进图里：手表桌面指示窗只认 {@code A1/A/A0} 图 +
-     * {@code B/B0} 文本，两个槽位分别渲染会变成「箭头 / 距离」交替；
-     * 合成一张图至少保证画面里箭头和距离同时在场。
+     * <p>图里<b>只画箭头</b>，不画距离：距离交给 {@code B} 层文本，由手表自己把
+     * 「图 + 文本」排成一行 —— 这正是原生的排版方式。把距离也画进图里会和
+     * {@code B} 文本重复显示。
      */
-    private static byte[] turnArrowPng(String text, String distance) {
+    private static byte[] turnArrowPng(String text) {
         try {
             final int size = 120;
             final android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(
@@ -592,24 +592,24 @@ final class FluidInjector {
             final android.graphics.Canvas canvas = new android.graphics.Canvas(bmp);
             canvas.drawColor(0x00000000);
 
-            final boolean withText = distance != null && !distance.isEmpty();
-            // 带文字时把箭头压到上半部分，底部留给距离
-            final float headTop = withText ? size * 0.05f : size * 0.12f;
-            final float headBase = withText ? size * 0.34f : size * 0.44f;
-            final float shaftBottom = withText ? size * 0.58f : size * 0.85f;
-            final float headHalf = withText ? 22f : 26f;
-            final float shaftHalf = withText ? 7f : 9f;
-            final float pivotY = withText ? size * 0.31f : size / 2f;
+            final float cx = size / 2f;
+            final float cy = size / 2f;
+            final float half = 46f;
 
             canvas.save();
-            canvas.rotate(turnAngle(text), size / 2f, pivotY);
+            canvas.rotate(turnAngle(text), cx, cy);
 
             final android.graphics.Paint paint = new android.graphics.Paint();
             paint.setAntiAlias(true);
             paint.setColor(0xFFFFFFFF);
             paint.setStyle(android.graphics.Paint.Style.FILL);
 
-            final float cx = size / 2f;
+            final float headTop = cy - half;
+            final float headBase = cy - half * 0.22f;
+            final float shaftBottom = cy + half;
+            final float headHalf = half * 0.46f;
+            final float shaftHalf = half * 0.14f;
+
             // 箭头杆
             canvas.drawRect(cx - shaftHalf, headBase, cx + shaftHalf, shaftBottom, paint);
             // 箭头头
@@ -620,21 +620,6 @@ final class FluidInjector {
             head.close();
             canvas.drawPath(head, paint);
             canvas.restore();
-
-            if (withText) {
-                final android.graphics.Paint textPaint = new android.graphics.Paint();
-                textPaint.setAntiAlias(true);
-                textPaint.setColor(0xFFFFFFFF);
-                textPaint.setTextAlign(android.graphics.Paint.Align.CENTER);
-                textPaint.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-                float textSize = 34f;
-                textPaint.setTextSize(textSize);
-                while (textSize > 12f && textPaint.measureText(distance) > size * 0.94f) {
-                    textSize -= 2f;
-                    textPaint.setTextSize(textSize);
-                }
-                canvas.drawText(distance, size / 2f, size * 0.94f, textPaint);
-            }
 
             final java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
             bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out);
