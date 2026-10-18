@@ -39,9 +39,10 @@ final class FluidProbe {
             "com.heytap.health.watch.notification.impl.cloud.CloudPushManager";
     private static final String EVENT_MANAGER =
             "com.heytap.health.watch.notification.impl.transceiver.NotificationEventManager";
+    private static final String FLUID_MANAGER =
+            "com.heytap.health.watch.notification.impl.fluid.FluidManager";
     private static final String REGISTER_CENTER =
-            "com.heytap.health.watch.notification.HealthNotificationRegisterCenter";
-    private static final String BEAN =
+            "com.heytap.health.watch.notification.HealthNotificationRegisterCenter";    private static final String BEAN =
             "com.heytap.health.watch.notification.HealthNotificationBean";
     private static final String SEEDING_BUILDER =
             "com.heytap.health.watch.notification.SeedingCardStyleProto$Builder";
@@ -82,6 +83,10 @@ final class FluidProbe {
 
         // 3) 静默去重：重复卡片会被直接丢弃，是「什么都没有」的常见原因
         observe(cl, xp, CONVERTER, "isDuplicateFluidSeedingCard", "java.lang.String", SEEDING_BUILDER);
+
+        // 3.5) 参考路径：OPPO 自己的 sendCardData。
+        //      用它对照就能知道「真卡片长什么样」，以及官方链路此刻是否也在出卡。
+        observe(cl, xp, FLUID_MANAGER, "sendCardData");
 
         // 4) 真正推送到手表
         observe(cl, xp, CLOUD_PUSH, "cloudPush", BEAN);
@@ -272,11 +277,10 @@ final class FluidProbe {
                     + "{title=" + title + ", content=" + content
                     + ", pkg=" + callString(o, "getPackageName") + "}";
         }
-        // protobuf Builder：打印序列化后的长度，能看出到底塞进去多少字段
+        // protobuf Builder：构建出来之后把 texts/images 逐项展开，
+        // 这是「到底往手表送了哪些层级」的唯一直接证据
         if (o.getClass().getName().endsWith("Builder")) {
-            final String built = callString(o, "toString");
-            return simpleName(o.getClass().getName())
-                    + "(" + (built == null ? "?" : built.length() + " chars") + ")";
+            return describeProto(o);
         }
         // List：逐项展开
         if (o instanceof List) {
@@ -293,18 +297,79 @@ final class FluidProbe {
         return simpleName(o.getClass().getName());
     }
 
-    /** TextBean / ImageBean 摘要：level + text 是判断层级对不对的直接证据。 */
+    /**
+     * protobuf 消息/Builder 摘要：把 {@code get*List()} 里的元素逐个展开。
+     *
+     * <p>对 {@code SeedingCardStyleProto} 来说，{@code getTextsList()} 就是发到手表上的
+     * 文本层级列表 —— 看到 {@code TextElement{level=B1, text=…}} 才说明链路真的通了。
+     */
+    private static String describeProto(Object builderOrProto) {
+        Object proto = builderOrProto;
+        try {
+            final Method build = builderOrProto.getClass().getMethod("build");
+            build.setAccessible(true);
+            proto = build.invoke(builderOrProto);
+        } catch (Throwable ignored) {
+            // 已经是 proto 本体，直接用
+        }
+        if (proto == null) {
+            return simpleName(builderOrProto.getClass().getName()) + "(empty)";
+        }
+        final StringBuilder sb = new StringBuilder(simpleName(proto.getClass().getName()));
+        try {
+            for (Method m : proto.getClass().getMethods()) {
+                final String name = m.getName();
+                if (!name.startsWith("get") || !name.endsWith("List") || m.getParameterCount() != 0) {
+                    continue;
+                }
+                m.setAccessible(true);
+                final Object value = m.invoke(proto);
+                if (!(value instanceof List) || ((List<?>) value).isEmpty()) {
+                    continue;
+                }
+                final List<?> list = (List<?>) value;
+                sb.append(' ').append(Character.toLowerCase(name.charAt(3)))
+                        .append(name, 4, name.length() - 4).append("=[");
+                final int shown = Math.min(list.size(), 6);
+                for (int i = 0; i < shown; i++) {
+                    if (i > 0) {
+                        sb.append(", ");
+                    }
+                    sb.append(describeElement(list.get(i)));
+                }
+                if (list.size() > shown) {
+                    sb.append(", …+").append(list.size() - shown);
+                }
+                sb.append(']');
+            }
+        } catch (Throwable t) {
+            sb.append(" <").append(t.getClass().getSimpleName()).append('>');
+        }
+        return sb.toString();
+    }
+
+    /** TextElement / ImagesElement / ButtonsElement 摘要：level 是判断层级对不对的直接证据。 */
     private static String describeElement(Object e) {
         if (e == null) {
             return "null";
         }
         final String level = callString(e, "getLevel");
         final String text = callString(e, "getText");
-        if (level != null || text != null) {
-            return simpleName(e.getClass().getName())
-                    + "{level=" + level + ", text=" + text + "}";
+        final String imageKey = callString(e, "getImageKey");
+        if (level == null && text == null && imageKey == null) {
+            return simpleName(e.getClass().getName());
         }
-        return simpleName(e.getClass().getName());
+        final StringBuilder sb = new StringBuilder(simpleName(e.getClass().getName())).append('{');
+        if (level != null) {
+            sb.append("level=").append(level);
+        }
+        if (text != null) {
+            sb.append(level == null ? "" : ", ").append("text=").append(text);
+        }
+        if (imageKey != null) {
+            sb.append(level == null && text == null ? "" : ", ").append("imageKey=").append(imageKey);
+        }
+        return sb.append('}').toString();
     }
 
     private static String callString(Object target, String getter) {
