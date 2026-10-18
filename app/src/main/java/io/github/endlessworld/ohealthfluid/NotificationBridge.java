@@ -36,10 +36,28 @@ final class NotificationBridge {
     private static final long DEDUP_WINDOW_MS = 10_000L;
     private static final java.util.Map<String, Long> SEEN_AT = new java.util.HashMap<>();
 
+    /**
+     * 是否把第三方通知伪造成卡片。
+     *
+     * <p><b>当前关闭，用于对照实验</b>：设备能力已确认支持（{@code isWatch4Gen=true}、
+     * {@code isSupportFluid=true}、{@code isSupportWebp=true}），但我们伪造的载荷在手表上
+     * 只画出空白框。先关掉伪造，让 OPPO 健康自己处理百度地图这类内置白名单应用的通知，
+     * 再对比手表表现：
+     * <ul>
+     *   <li>原生卡片能显示内容 → 我们的伪造协议不对，照原生的键重做；</li>
+     *   <li>原生卡片同样空白 → 空白框与载荷无关，是手表端模板/云端配置的问题。</li>
+     * </ul>
+     */
+    private static final boolean BRIDGE_ENABLED = false;
+
     private NotificationBridge() {
     }
 
     static void install(ClassLoader cl, io.github.libxposed.api.XposedInterface xp) {
+        if (!BRIDGE_ENABLED) {
+            Log.i(TAG, "[BRIDGE] disabled -> 观察原生链路（白名单应用通知由 App 自己处理）");
+            return;
+        }
         final Class<?> rankingMapCls = NotificationListenerService.RankingMap.class;
 
         // 主路径：hook OPPO 健康自己的监听服务实现
