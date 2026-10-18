@@ -58,8 +58,13 @@ public final class FluidUnlockModule extends XposedModule {
         hookObservers(cl);
 
         // 全链路只读探针：convertFluidNew / newPb / oldPb / cloudPush
-        // （之前一直没接进来，所以日志里只有 [OBS]/[GATE]，看不到卡片到底断在哪一环）
-        FluidProbe.install(cl, this);
+        // 日志走模块自己的 log(...)，这样带 LSPosed 模块前缀，能和 [OBS]/[GATE] 一起看到；
+        // 之前用 android.util.Log 打的是 OHealthFluidUnlock 标签，在按前缀过滤的视图里整片消失。
+        try {
+            FluidProbe.install(cl, this, msg -> log(Log.INFO, TAG, msg));
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "FluidProbe.install failed: " + t);
+        }
 
         // 方案 A：解锁「设备 → 通知 → 流体云」设置页
         FluidGate.install(cl, this);

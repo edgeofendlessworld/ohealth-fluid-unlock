@@ -3,37 +3,35 @@ package io.github.endlessworld.ohealthfluid;
 import android.os.Bundle;
 import android.util.Log;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.List;
 import java.util.Set;
 
 import io.github.libxposed.api.XposedInterface;
 
 /**
- * 只读探针：把流体云卡片从「注入」到「推送到手表」的整条链打上观测点。
+ * 只读探针：把「注入 → 转换 → 推送手表」这条链路逐段打出来。
  *
- * <p>要回答的核心问题是：数据到底断在哪一环。链路如下：
+ * <p>要回答的问题只有一个：注入的 bundle 已经带上了 B1/C1（旧协议扁平键）与
+ * KEY_TEXTS（新协议），到底是在哪一跳丢的。
  *
- * <pre>
- * ExternalFluidCloudInjector.doInject          ← 我注入的入口（已知能到）
- *   └─ HealthNotificationRegisterCenter.onNotificationFluid
- *        └─ NotificationEventManager.onNotificationFluid
- *             └─ ConverterWorker.convertFluidNew      ← 卡片序列化（按手表世代二选一）
- *                  ├─ newPb(hnb, bundle, builder)     ← isNewPbField()==true
- *                  └─ oldPb(bundle, builder)          ← isNewPbField()==false
- *                       └─ CloudPushManager.cloudPush  ← 真正发给手表
- * </pre>
- *
- * <p>判读要点：
- * <ul>
- *   <li>若 {@code convertFluidNew} / {@code newPb} 出现 → 序列化在跑，问题在字段内容</li>
- *   <li>若 {@code CloudPushManager.cloudPush} 从不出现 → 卡在传输层（需要设备密钥协商），
- *       这属于 ColorOS 环境依赖，模块无法绕过</li>
- * </ul>
+ * <p>日志一律走 {@link Sink} 回调到模块自身的 {@code log(...)}，这样日志行和
+ * {@code [OBS]}/{@code [GATE]} 一样带 LSPosed 的模块前缀 —— 否则
+ * {@code android.util.Log} 打出来的行标签是 {@code OHealthFluidUnlock}，
+ * 在按模块前缀过滤的日志视图里会整片消失。
  */
 final class FluidProbe {
 
     private static final String TAG = "OHealthFluidUnlock";
+
+    /** 日志出口，由模块注入；为 null 时退回 android.util.Log。 */
+    interface Sink {
+        void log(String message);
+    }
+
+    private static Sink sSink;
 
     private static final String CONVERTER =
             "com.heytap.health.watch.notification.impl.transceiver.convert.ConverterWorker";
@@ -43,39 +41,137 @@ final class FluidProbe {
             "com.heytap.health.watch.notification.impl.transceiver.NotificationEventManager";
     private static final String REGISTER_CENTER =
             "com.heytap.health.watch.notification.HealthNotificationRegisterCenter";
+    private static final String BEAN =
+            "com.heytap.health.watch.notification.HealthNotificationBean";
+    private static final String SEEDING_BUILDER =
+            "com.heytap.health.watch.notification.SeedingCardStyleProto$Builder";
+    private static final String PARSED_BUILDER =
+            "com.heytap.health.watch.notification.ParsedNotificationProto$Builder";
+
+    /** convertFluid 的四个实现类：注入后一定会命中其中一个。 */
+    private static final String[] CONVERT_WORKERS = {
+            "com.heytap.health.watch.notification.impl.transceiver.convert.Watch4GenConverterWorker",
+            "com.heytap.health.watch.notification.impl.transceiver.convert.NormalConverterWorker",
+            "com.heytap.health.watch.notification.impl.transceiver.convert.BleConverterWorker",
+            "com.heytap.health.watch.notification.impl.transceiver.convert.IWatchConverterWorker",
+    };
 
     private FluidProbe() {
     }
 
-    static void install(ClassLoader cl, XposedInterface xp) {
-        // 1) 分发中心（注入后的第一站）
-        observe(cl, xp, REGISTER_CENTER, "onNotificationFluid",
-                "com.heytap.health.watch.notification.HealthNotificationBean",
-                "android.os.Bundle");
+    static void install(ClassLoader cl, XposedInterface xp, Sink sink) {
+        sSink = sink;
+        // 第一行必须是可见的：如果这一行都看不到，说明 FluidProbe 根本没被加载，
+        // 而不是「钩子没命中」。
+        log("[PROBE] install() entered");
 
-        // 2) 事件管理器 → 决定是否推手表
-        observe(cl, xp, EVENT_MANAGER, "onNotificationFluid",
-                "com.heytap.health.watch.notification.HealthNotificationBean",
-                "android.os.Bundle");
+        // 0) 分发中心：注入后的第一站，也是最前的一跳
+        observe(cl, xp, REGISTER_CENTER, "onNotificationFluid", BEAN, "android.os.Bundle");
+        observe(cl, xp, EVENT_MANAGER, "onNotificationFluid", BEAN, "android.os.Bundle");
 
-        // 3) 卡片序列化入口：能直接看出手表走的是新协议还是旧协议
-        observe(cl, xp, CONVERTER, "convertFluidNew",
-                "com.heytap.health.watch.notification.HealthNotificationBean",
-                "android.os.Bundle",
-                "com.heytap.health.watch.notification.ParsedNotificationProto$Builder");
+        // 1) 四个 convertFluid 实现：无论手表是哪一代，都会命中一个。
+        //    这里同时把 ability 的三个世代开关打出来，直接判定走 newPb 还是 oldPb。
+        for (String worker : CONVERT_WORKERS) {
+            observeWithAbility(cl, xp, worker, "convertFluid", BEAN, "android.os.Bundle");
+        }
 
-        // 4) 新旧协议各自的字段填充点
-        observe(cl, xp, CONVERTER, "newPb",
-                "com.heytap.health.watch.notification.HealthNotificationBean",
-                "android.os.Bundle",
-                "com.heytap.health.watch.notification.SeedingCardStyleProto$Builder");
-        observe(cl, xp, CONVERTER, "oldPb",
-                "android.os.Bundle",
-                "com.heytap.health.watch.notification.SeedingCardStyleProto$Builder");
+        // 2) 新旧协议的填充点
+        observe(cl, xp, CONVERTER, "convertFluidNew", BEAN, "android.os.Bundle", PARSED_BUILDER);
+        observe(cl, xp, CONVERTER, "newPb", BEAN, "android.os.Bundle", SEEDING_BUILDER);
+        observe(cl, xp, CONVERTER, "oldPb", "android.os.Bundle", SEEDING_BUILDER);
 
-        // 5) 真正推送到手表（最关键：不出现说明卡在传输层）
-        observe(cl, xp, CLOUD_PUSH, "cloudPush",
-                "com.heytap.health.watch.notification.HealthNotificationBean");
+        // 3) 静默去重：重复卡片会被直接丢弃，是「什么都没有」的常见原因
+        observe(cl, xp, CONVERTER, "isDuplicateFluidSeedingCard", "java.lang.String", SEEDING_BUILDER);
+
+        // 4) 真正推送到手表
+        observe(cl, xp, CLOUD_PUSH, "cloudPush", BEAN);
+
+        log("[PROBE] install() done");
+    }
+
+    /**
+     * 挂点，并在每次命中时额外打印 {@code ConverterWorker.ability} 的世代开关，
+     * 用来判定 newPb / oldPb 分支。
+     */
+    private static void observeWithAbility(ClassLoader cl, XposedInterface xp,
+                                           String className, String methodName,
+                                           String... paramTypes) {
+        try {
+            final Class<?> cls = Class.forName(className, false, cl);
+            final Method m = findMethod(cls, methodName, cl, paramTypes);
+            if (m == null) {
+                log("[PROBE] SKIP " + simpleName(className) + "#" + methodName);
+                return;
+            }
+            m.setAccessible(true);
+            final Field abilityField = findAbilityField(cl);
+
+            final String label = simpleName(className) + "#" + methodName;
+            xp.hook(m).intercept(chain -> {
+                final Object result;
+                try {
+                    result = chain.proceed();
+                } catch (Throwable t) {
+                    log("[PROBE] " + label + " threw: " + t);
+                    throw t;
+                }
+                final StringBuilder sb = new StringBuilder("[PROBE] ").append(label);
+                for (Object a : chain.getArgs()) {
+                    sb.append(" | ").append(summarize(a));
+                }
+                sb.append(" | ").append(describeAbility(abilityField));
+                if (!isVoid(m)) {
+                    sb.append(" => ").append(summarize(result));
+                }
+                log(sb.toString());
+                return result;
+            });
+            log("[PROBE] installed : " + label);
+        } catch (Throwable t) {
+            log("[PROBE] SKIP " + simpleName(className) + "#" + methodName + ": "
+                    + t.getClass().getSimpleName() + " " + t.getMessage());
+        }
+    }
+
+    /** {@code ConverterWorker.ability} 是 public static 字段，指向当前的设备能力对象。 */
+    private static Field findAbilityField(ClassLoader cl) {
+        try {
+            final Field f = Class.forName(CONVERTER, false, cl).getField("ability");
+            f.setAccessible(true);
+            return f;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 把 isNewPbField / isOldFluid / isSupportWebp 三个开关读出来。 */
+    private static String describeAbility(Field abilityField) {
+        if (abilityField == null) {
+            return "ability=?";
+        }
+        try {
+            final Object ability = abilityField.get(null);
+            if (ability == null) {
+                return "ability=null";
+            }
+            // 用字段声明类型（公开的能力接口）取方法，避免实现类不可访问导致 IllegalAccessException
+            final Class<?> type = abilityField.getType();
+            return "isNewPbField=" + invokeBool(type, ability, "isNewPbField")
+                    + ", isOldFluid=" + invokeBool(type, ability, "isOldFluid")
+                    + ", isSupportWebp=" + invokeBool(type, ability, "isSupportWebp");
+        } catch (Throwable t) {
+            return "ability=<" + t.getClass().getSimpleName() + ">";
+        }
+    }
+
+    private static String invokeBool(Class<?> type, Object target, String method) {
+        try {
+            final Method m = type.getMethod(method);
+            m.setAccessible(true);
+            return String.valueOf(m.invoke(target));
+        } catch (Throwable t) {
+            return "?";
+        }
     }
 
     /**
@@ -87,6 +183,7 @@ final class FluidProbe {
             final Class<?> cls = Class.forName(className, false, cl);
             final Method m = findMethod(cls, methodName, cl, paramTypes);
             if (m == null) {
+                log("[PROBE] SKIP " + simpleName(className) + "#" + methodName);
                 return;
             }
             m.setAccessible(true);
@@ -97,7 +194,7 @@ final class FluidProbe {
                 try {
                     result = chain.proceed();
                 } catch (Throwable t) {
-                    Log.w(TAG, "[PROBE] " + label + " threw: " + t);
+                    log("[PROBE] " + label + " threw: " + t);
                     throw t;
                 }
                 final StringBuilder sb = new StringBuilder("[PROBE] ").append(label);
@@ -107,38 +204,45 @@ final class FluidProbe {
                 if (!isVoid(m)) {
                     sb.append(" => ").append(summarize(result));
                 }
-                Log.i(TAG, sb.toString());
+                log(sb.toString());
                 return result;
             });
-            Log.i(TAG, "probe installed : " + label);
+            log("[PROBE] installed : " + label);
         } catch (Throwable t) {
-            Log.i(TAG, "SKIP probe " + className + "#" + methodName + ": "
-                    + t.getClass().getSimpleName());
+            log("[PROBE] SKIP " + className + "#" + methodName + ": "
+                    + t.getClass().getSimpleName() + " " + t.getMessage());
         }
     }
 
-    /** 精确签名优先；失败则按方法名取第一个重载（容忍不同版本的参数差异）。 */
+    private static void log(String message) {
+        final Sink sink = sSink;
+        if (sink != null) {
+            sink.log(message);
+        } else {
+            Log.i(TAG, message);
+        }
+    }
+
+    /** 精确签名优先；失败则按方法名取第一个具体重载（容忍不同版本的参数差异）。 */
     private static Method findMethod(Class<?> cls, String name, ClassLoader cl, String... paramTypes) {
         try {
             final Class<?>[] types = new Class<?>[paramTypes.length];
             for (int i = 0; i < paramTypes.length; i++) {
                 types[i] = Class.forName(paramTypes[i], false, cl);
             }
-            final Method m = cls.getDeclaredMethod(name, types);
-            return m;
+            return cls.getDeclaredMethod(name, types);
         } catch (NoSuchMethodException ignored) {
             // 退化为按名匹配
         } catch (Throwable t) {
-            Log.i(TAG, "probe signature error " + name + ": " + t.getClass().getSimpleName());
+            log("[PROBE] signature error " + name + ": " + t.getClass().getSimpleName());
             return null;
         }
         for (Method m : cls.getDeclaredMethods()) {
             if (m.getName().equals(name) && !Modifier.isAbstract(m.getModifiers())) {
-                Log.i(TAG, "probe: " + name + " matched by name (params differ)");
+                log("[PROBE] " + name + " matched by name (params differ)");
                 return m;
             }
         }
-        Log.i(TAG, "probe: " + name + " not found on " + cls.getName());
         return null;
     }
 
@@ -160,7 +264,7 @@ final class FluidProbe {
         if (o instanceof CharSequence || o instanceof Number || o instanceof Boolean) {
             return String.valueOf(o);
         }
-        // HealthNotificationBean：尽量取标题/正文，信息量最高
+        // HealthNotificationBean：标题/正文信息量最高
         final String title = callString(o, "getTitle");
         final String content = callString(o, "getContent");
         if (title != null || content != null) {
@@ -168,13 +272,39 @@ final class FluidProbe {
                     + "{title=" + title + ", content=" + content
                     + ", pkg=" + callString(o, "getPackageName") + "}";
         }
-        // protobuf Builder：打印已设置字段数即可
+        // protobuf Builder：打印序列化后的长度，能看出到底塞进去多少字段
         if (o.getClass().getName().endsWith("Builder")) {
             final String built = callString(o, "toString");
             return simpleName(o.getClass().getName())
                     + "(" + (built == null ? "?" : built.length() + " chars") + ")";
         }
+        // List：逐项展开
+        if (o instanceof List) {
+            final List<?> list = (List<?>) o;
+            final StringBuilder sb = new StringBuilder("List(size=").append(list.size()).append(")[");
+            for (int i = 0; i < list.size(); i++) {
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                sb.append(describeElement(list.get(i)));
+            }
+            return sb.append(']').toString();
+        }
         return simpleName(o.getClass().getName());
+    }
+
+    /** TextBean / ImageBean 摘要：level + text 是判断层级对不对的直接证据。 */
+    private static String describeElement(Object e) {
+        if (e == null) {
+            return "null";
+        }
+        final String level = callString(e, "getLevel");
+        final String text = callString(e, "getText");
+        if (level != null || text != null) {
+            return simpleName(e.getClass().getName())
+                    + "{level=" + level + ", text=" + text + "}";
+        }
+        return simpleName(e.getClass().getName());
     }
 
     private static String callString(Object target, String getter) {
@@ -205,7 +335,15 @@ final class FluidProbe {
                 } else if (v instanceof Bundle) {
                     sb.append("Bundle").append(dumpBundle((Bundle) v));
                 } else if (v instanceof java.util.List) {
-                    sb.append("List(size=").append(((java.util.List<?>) v).size()).append(')');
+                    final List<?> list = (List<?>) v;
+                    sb.append("List(size=").append(list.size()).append(")[");
+                    for (int i = 0; i < list.size(); i++) {
+                        if (i > 0) {
+                            sb.append(", ");
+                        }
+                        sb.append(describeElement(list.get(i)));
+                    }
+                    sb.append(']');
                 } else {
                     sb.append(v);
                 }
