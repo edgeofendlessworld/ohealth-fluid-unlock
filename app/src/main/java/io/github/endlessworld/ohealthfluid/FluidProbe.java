@@ -125,23 +125,32 @@ final class FluidProbe {
             xp.hook(m).intercept(chain -> {
                 final Object result = chain.proceed();
                 Object builder = null;
+                String override = null;
                 for (Object a : chain.getArgs()) {
                     if (a != null && a.getClass().getName().contains("SeedingCardStyleProto$Builder")) {
                         builder = a;
+                    } else if (a instanceof Bundle) {
+                        // 注入侧写在 fluid_data 里的模板指派；normalizeFluidBundle 会整包拷贝，所以能到这里
+                        override = ((Bundle) a).getString("probe_type_override");
                     }
                 }
-                String before = null;
-                if (builder != null) {
-                    before = callString(builder, "getType");
-                    if (!COMPAT_TYPE.equals(before)) {
-                        setType(builder, COMPAT_TYPE);
-                    }
+                if (builder == null) {
+                    log("[PROBE] ConverterWorker#newPb | builder not found");
+                    return result;
                 }
-                log("[PROBE] ConverterWorker#newPb | " + summarize(builder)
-                        + " | type " + before + " -> " + COMPAT_TYPE);
+                final String before = callString(builder, "getType");
+                if (override != null && !override.equals(before)) {
+                    setType(builder, override);
+                    log("[PROBE] ConverterWorker#newPb | " + summarize(builder)
+                            + " | type " + before + " -> " + override);
+                } else {
+                    log("[PROBE] ConverterWorker#newPb | " + summarize(builder)
+                            + " | type " + before
+                            + (override == null ? " (no override)" : " (already " + override + ")"));
+                }
                 return result;
             });
-            log("[PROBE] installed : ConverterWorker#newPb (with type override)");
+            log("[PROBE] installed : ConverterWorker#newPb (honors probe_type_override)");
         } catch (Throwable t) {
             log("[PROBE] SKIP ConverterWorker#newPb: "
                     + t.getClass().getSimpleName() + " " + t.getMessage());

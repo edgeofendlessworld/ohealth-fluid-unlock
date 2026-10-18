@@ -63,6 +63,46 @@ final class FluidInjector {
     private static final String LEVEL_CONTENT = "C1";
     private static final String LEVEL_SUBTITLE = "subTitle1";
 
+    /**
+     * 诊断模式：把「层级标签」撒进文本槽位，同一条通知发两张卡（两种模板各一张）。
+     *
+     * <p>手表拿到卡却不渲染时，靠猜字段效率极低。这里改成让卡自己回答：
+     * 每个 {@code fluid_texts} 条目的 {@code text} 直接写成它自己的层级名
+     * （{@code A1} 就写 "A1"）。模板真正会渲染的槽位，就会把对应字母显示出来 ——
+     * 一行日志都不用看，眼前出现哪些字母就说明哪些层级被固件接受。
+     *
+     * <p>同时发两种模板，是为了区分「模板选错」和「层级写错」：
+     * 两张卡里只要有一张出现字母，问题就只在模板；两张都空白，问题在层级或颜色。
+     */
+    private static final boolean SLOT_PROBE = true;
+
+    /** 诊断模式下每种模板发一张：{@code center:compat}（镜像通知）与 {@code center:common}（通用卡）。 */
+    private static final String[] PROBE_TYPES = {"center:compat", "center:common"};
+
+    /**
+     * 撒进槽位的层级标签：都是 {@code CardDataBuilderHelper} 里出现过的文本层级。
+     *
+     * <p>每条的内容写成 {@code "层级/颜色"}，并且用不同颜色发送。这样一次实验同时回答两个问题：
+     * 模板吃哪一层（出现哪个层级名），以及颜色是否会踩到背景上（同名文字在哪种颜色下能看见）。
+     */
+    private static final String[] PROBE_LEVELS = {"A1", "B", "C2", "C3"};
+
+    /** 与 {@link #PROBE_LEVELS} 一一对应的颜色：白（默认色）、深灰、红、绿。 */
+    private static final int[] PROBE_COLORS = {
+            -1,                // 0xFFFFFFFF，即 doInject 默认色
+            0xFF333333,        // 深灰（刻意避开纯黑：纯黑会被 ensureVisibleTextColor 改写成默认色）
+            0xFFFF0000,        // 红
+            0xFF00FF00,        // 绿
+    };
+
+    /**
+     * 两种配色方案：纯白与纯红，用来分辨「白字白底」这类不可见情况。
+     *
+     * <p>第二种没用纯黑，因为 {@code ProcessorBase} 的颜色兜底会把纯黑改写成默认色，
+     * 那样两张卡又会变得一模一样，对照就白做了。
+     */
+    private static final int[] PROBE_PALETTES = {-1, 0xFFFF0000};
+
     private FluidInjector() {
     }
 
@@ -77,8 +117,33 @@ final class FluidInjector {
      * @return 是否成功调用到 doInject
      */
     static boolean inject(ClassLoader cl, String pkg, String title, String text, int smallIconRes) {
+        if (!SLOT_PROBE) {
+            return injectOne(cl, pkg, title, text, null, 0, -1);
+        }
+        // 诊断模式：每种模板各发一张，标题直接写模板名 + 配色，方便对着手表认卡
+        boolean any = false;
+        for (int i = 0; i < PROBE_TYPES.length; i++) {
+            final int palette = PROBE_PALETTES[i % PROBE_PALETTES.length];
+            any |= injectOne(cl, pkg, title, text, PROBE_TYPES[i], i * 7919, palette);
+        }
+        return any;
+    }
+
+    /**
+     * 注入一张卡片。
+     *
+     * @param cl       目标进程 ClassLoader
+     * @param pkg      数据源包名（用于白名单校验，必须是 App 内置白名单里的包名）
+     * @param title    标题
+     * @param text     正文
+     * @param probeType 诊断用模板名；非 null 时标题会被替换成它，并撒入层级标签
+     * @param idOffset 诊断用 sbn_id 偏移，避免同一毫秒的两张卡被去重
+     * @param palette  诊断用文字颜色
+     */
+    private static boolean injectOne(ClassLoader cl, String pkg, String title, String text,
+                                     String probeType, int idOffset, int palette) {
         try {
-            final Bundle extras = buildExtras(cl, pkg, title, text);
+            final Bundle extras = buildExtras(cl, pkg, title, text, probeType, idOffset, palette);
             if (extras == null) {
                 return false;
             }
@@ -90,7 +155,8 @@ final class FluidInjector {
             doInject.setAccessible(true);
             doInject.invoke(injector, extras);
 
-            Log.i(TAG, "[INJECT] doInject ok: pkg=" + pkg + ", title=" + title);
+            Log.i(TAG, "[INJECT] doInject ok: pkg=" + pkg + ", title=" + title
+                    + (probeType == null ? "" : ", probe=" + probeType));
             return true;
         } catch (Throwable t) {
             Log.e(TAG, "[INJECT] failed: pkg=" + pkg, t);
@@ -112,24 +178,38 @@ final class FluidInjector {
      * }
      * </pre>
      */
-    private static Bundle buildExtras(ClassLoader cl, String pkg, String title, String text) {
+    private static Bundle buildExtras(ClassLoader cl, String pkg, String title, String text,
+                                      String probeType, int idOffset, int palette) {
         final Bundle fluidData = new Bundle();
+
+        // 诊断模式下标题写模板名 + 配色（W=白字 / R=红字），正文写占位词，
+        // 避免和真实导航文案混起来 —— 手表上看到哪一行，就知道是哪张卡、哪种配色。
+        final String paletteTag = palette == -1 ? "/W白" : "/R红";
+        final String effTitle = probeType != null ? probeType + paletteTag : (title == null ? "" : title);
+        final String effText = probeType != null ? "spray" : (text == null ? "" : text);
 
         // fluid_texts：parseTextItems 从中读取并构造 TextBean，
         // 层级必须用文本语义名（B1 = 标题 / C1 = 正文），否则手表拿到空槽位。
-        final ArrayList<Bundle> textItems = new ArrayList<>(3);
+        final ArrayList<Bundle> textItems = new ArrayList<>(3 + PROBE_LEVELS.length);
 
         // 标题
-        if (title != null && !title.isEmpty()) {
-            textItems.add(textItem(LEVEL_TITLE, title));
+        if (!effTitle.isEmpty()) {
+            textItems.add(textItem(LEVEL_TITLE, effTitle, palette));
         }
         // 正文
-        if (text != null && !text.isEmpty()) {
-            textItems.add(textItem(LEVEL_CONTENT, text));
+        if (!effText.isEmpty()) {
+            textItems.add(textItem(LEVEL_CONTENT, effText, palette));
         }
         // 正文缺失时用标题兜底，避免整张卡片没有可显示内容
         if (textItems.isEmpty()) {
-            textItems.add(textItem(LEVEL_CONTENT, pkg));
+            textItems.add(textItem(LEVEL_CONTENT, pkg, palette));
+        }
+        // 诊断：把层级名和颜色名写进各槽位，看模板到底渲染哪一层、哪种颜色能被看见
+        if (probeType != null) {
+            for (int i = 0; i < PROBE_LEVELS.length; i++) {
+                final int color = PROBE_COLORS[i % PROBE_COLORS.length];
+                textItems.add(textItem(PROBE_LEVELS[i], PROBE_LEVELS[i] + colorName(color), color));
+            }
         }
 
         fluidData.putParcelableArrayList("fluid_texts", textItems);
@@ -150,8 +230,14 @@ final class FluidInjector {
         // 之前只喂了 fluid_texts：走 newPb 的世代没问题，走 oldPb 的世代就只剩
         // 一个空的 DEFAULT_C 回落值 —— 卡片是空白的。这里把扁平键也一起写进去。
         // ------------------------------------------------------------------
-        final String titleSafe = title == null ? "" : title;
-        final String textSafe = text == null ? "" : text;
+        final String titleSafe = effTitle;
+        final String textSafe = effText;
+
+        // 诊断模式的模板覆盖：normalizeFluidBundle 会整包拷贝 fluid_data，
+        // 这个自定义键能一直活到 newPb 的 bundle 参数里，探针据此改写 type。
+        if (probeType != null) {
+            fluidData.putString("probe_type_override", probeType);
+        }
 
         // DEFAULT_C 必须放在 fluid_data **里面**：normalizeFluidBundle 是从
         // fluidData 里 getString("DEFAULT_C", "流体云样例") 读的，
@@ -169,29 +255,58 @@ final class FluidInjector {
             fluidData.putString("C1", titleSafe);
         }
 
+        // 诊断：oldPb 分支能读的扁平键也补上同名内容，排除分支差异的干扰
+        if (probeType != null) {
+            fluidData.putString("B", "B");
+            fluidData.putString("C2", "C2");
+            fluidData.putString("C3", "C3");
+        }
+
         final Bundle extras = new Bundle();
         extras.putString("sbn_package", pkg);
         extras.putString("sbn_title", titleSafe);
         extras.putString("sbn_text", textSafe);
-        extras.putInt("sbn_id", (int) (System.currentTimeMillis() & 0x7fffffff));
+        extras.putInt("sbn_id", (int) (System.currentTimeMillis() & 0x7fffffff) + idOffset);
         extras.putBundle("fluid_data", fluidData);
 
         Log.i(TAG, "[INJECT] extras: pkg=" + pkg
                 + ", texts=" + textItems.size()
-                + " (" + LEVEL_TITLE + "=" + title + ", " + LEVEL_CONTENT + "=" + text + ")"
-                + ", legacy B1/C1 + DEFAULT_C in fluid_data");
+                + " (" + LEVEL_TITLE + "=" + effTitle + ", " + LEVEL_CONTENT + "=" + effText + ")"
+                + ", legacy B1/C1 + DEFAULT_C in fluid_data"
+                + (probeType == null ? "" : ", probe_type_override=" + probeType + ", palette=" + paletteTag));
 
         return extras;
     }
 
     /** 单个 {@code fluid_texts} 元素；键名与 {@code parseTextItems} 的读取保持一致。 */
     private static Bundle textItem(String level, String content) {
+        return textItem(level, content, -1);
+    }
+
+    /** 同上，可指定颜色；{@code -1} 即 {@code 0xFFFFFFFF}。 */
+    private static Bundle textItem(String level, String content, int color) {
         final Bundle item = new Bundle();
         item.putString("level", level);
         item.putString("text", content == null ? "" : content);
-        item.putInt("color", -1);        // 默认色（-1 = 0xFFFFFFFF）
+        item.putInt("color", color);
         item.putInt("bg_color", 0);      // 透明
         return item;
+    }
+
+    /** 颜色名，用于写进诊断文本，让手表上的字自己说出它是什么颜色。 */
+    private static String colorName(int color) {
+        switch (color) {
+            case -1:
+                return "/白";
+            case 0xFF333333:
+                return "/深灰";
+            case 0xFFFF0000:
+                return "/红";
+            case 0xFF00FF00:
+                return "/绿";
+            default:
+                return "/" + Integer.toHexString(color);
+        }
     }
 
     // ------------------------------------------------------------------

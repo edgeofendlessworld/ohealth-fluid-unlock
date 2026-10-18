@@ -42,14 +42,17 @@ public final class FluidUnlockModule extends XposedModule {
     private static final Set<String> GATE_LOGGED = ConcurrentHashMap.newKeySet();
 
     /**
-     * 把卡片模板钉成 {@code center:compat}。
+     * 把卡片模板全局钉成 {@code center:compat}。
      *
-     * <p>{@code ConverterWorker.newPb} 在第 811-827 行选模板：缺 {@code KEY_TYPES} 时
-     * 落到 {@code "center:common"}；只有当 {@code isNewPbFieldCompat()} 与
-     * {@code FluidConfigCenter.compatMode(pkg)} 同时为真时，才会用 {@code "center:compat"} ——
-     * 那是「把一条普通通知镜像成卡片」的模板，对字段要求最少，最贴近我们的用法。
+     * <p>{@code ConverterWorker.newPb} 选模板：缺 {@code KEY_TYPES} 时落到
+     * {@code "center:common"}；只有 {@code isNewPbFieldCompat()} 与
+     * {@code FluidConfigCenter.compatMode(pkg)} 同时为真时才用 {@code "center:compat"}。
+     *
+     * <p>现在关掉：模板改由注入侧逐卡指派（{@code fluid_data} 里的
+     * {@code probe_type_override}，由探针在 {@code newPb} 返回后覆盖 builder 上的 type）。
+     * 全局开关会把每张卡都压成 compat，层级标签喷雾就分不出「模板选错」还是「层级写错」。
      */
-    private static final boolean FORCE_COMPAT_TEMPLATE = true;
+    private static final boolean FORCE_COMPAT_TEMPLATE = false;
 
     @Override
     public void onPackageReady(PackageReadyParam param) {
