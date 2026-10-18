@@ -121,17 +121,48 @@ final class FluidInjector {
      * @param smallIconRes 小图标资源 id（可用 0，缺省时用 App 自身默认）
      * @return 是否成功调用到 doInject
      */
-    static boolean inject(ClassLoader cl, String pkg, String title, String text, int smallIconRes) {
+    static boolean inject(ClassLoader cl, String pkg, String title, String text, int smallIconRes,
+                          int sbnId) {
         if (!SLOT_PROBE) {
-            return injectOne(cl, pkg, title, text, null, 0, -1);
+            return injectOne(cl, pkg, title, text, null, 0, -1, sbnId);
         }
         // 诊断模式：每种模板各发一张，标题直接写模板名 + 配色，方便对着手表认卡
         boolean any = false;
         for (int i = 0; i < PROBE_TYPES.length; i++) {
             final int palette = PROBE_PALETTES[i % PROBE_PALETTES.length];
-            any |= injectOne(cl, pkg, title, text, PROBE_TYPES[i], i * 7919, palette);
+            any |= injectOne(cl, pkg, title, text, PROBE_TYPES[i], i * 7919, palette, sbnId + i);
         }
         return any;
+    }
+
+    /**
+     * 让手表撤掉一张卡片（对应 {@code ExternalFluidCloudInjector.doRemove(Bundle)}）。
+     *
+     * <p>原生路径在通知被移除时会走 {@code HealthNotificationRegisterCenter.onNotificationFluidRemoved}，
+     * 我们只 hook 了 {@code onNotificationPosted}，所以以前源通知消失后手表上的卡会变成僵尸。
+     *
+     * <p>注意 {@code doRemove} 只认 {@code sbn_package} + {@code sbn_id} 两个键，
+     * 且 {@code sbn_id} 必须与注入时<b>完全一致</b>（它构成卡片的 key），
+     * 否则删不掉任何东西。
+     */
+    static boolean remove(ClassLoader cl, String pkg, int sbnId) {
+        try {
+            final Class<?> cls = Class.forName(INJECTOR, false, cl);
+            final Object injector = cls.getField("INSTANCE").get(null);
+            final Method doRemove = cls.getDeclaredMethod("doRemove", Bundle.class);
+            doRemove.setAccessible(true);
+
+            final Bundle extras = new Bundle();
+            extras.putString("sbn_package", pkg);
+            extras.putInt("sbn_id", sbnId);
+            doRemove.invoke(injector, extras);
+
+            Log.i(TAG, "[INJECT] doRemove ok: pkg=" + pkg + ", id=" + sbnId);
+            return true;
+        } catch (Throwable t) {
+            Log.e(TAG, "[INJECT] remove failed: pkg=" + pkg + ", id=" + sbnId, t);
+            return false;
+        }
     }
 
     /**
@@ -146,9 +177,9 @@ final class FluidInjector {
      * @param palette  诊断用文字颜色
      */
     private static boolean injectOne(ClassLoader cl, String pkg, String title, String text,
-                                     String probeType, int idOffset, int palette) {
+                                     String probeType, int idOffset, int palette, int sbnId) {
         try {
-            final Bundle extras = buildExtras(cl, pkg, title, text, probeType, idOffset, palette);
+            final Bundle extras = buildExtras(cl, pkg, title, text, probeType, idOffset, palette, sbnId);
             if (extras == null) {
                 return false;
             }
@@ -184,7 +215,7 @@ final class FluidInjector {
      * </pre>
      */
     private static Bundle buildExtras(ClassLoader cl, String pkg, String title, String text,
-                                      String probeType, int idOffset, int palette) {
+                                      String probeType, int idOffset, int palette, int sbnId) {
         final Bundle fluidData = new Bundle();
 
         // 诊断模式下标题写模板名 + 配色（W=白字 / R=红字），正文写占位词，
@@ -297,10 +328,14 @@ final class FluidInjector {
         extras.putString("sbn_package", pkg);
         extras.putString("sbn_title", titleSafe);
         extras.putString("sbn_text", textSafe);
-        extras.putInt("sbn_id", (int) (System.currentTimeMillis() & 0x7fffffff) + idOffset);
+        // sbn_id 是这张卡在手表上的身份（HealthNotificationBean.key = pkg|id|tag|uid）。
+        // 必须沿用源通知的 id：这样同一条通知的更新才是「替换同一张卡」。
+        // 以前用 currentTimeMillis 当 id，每次更新都生成新卡 —— 手表上表现为
+        // 「内容永远停在第一版」并且「关掉之后下一帧又冒出来」。
+        extras.putInt("sbn_id", sbnId + idOffset);
         extras.putBundle("fluid_data", fluidData);
 
-        Log.i(TAG, "[INJECT] extras: pkg=" + pkg
+        Log.i(TAG, "[INJECT] extras: pkg=" + pkg + ", id=" + (sbnId + idOffset)
                 + ", texts=" + textItems.size()
                 + " (" + LEVEL_TITLE + "=" + effTitle + ", " + LEVEL_CONTENT + "=" + effText + ")"
                 + ", images=" + imageCount + (imageCount == 0 ? " (缺少图标!)" : " (D1+A1)")
