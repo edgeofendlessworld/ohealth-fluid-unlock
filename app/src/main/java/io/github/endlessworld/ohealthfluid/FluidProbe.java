@@ -261,7 +261,7 @@ final class FluidProbe {
     private static volatile boolean abilityDumped;
 
     /**
-     * 把能力对象上所有无参 {@code is*/get*} 方法全跑一遍并打印。
+     * 把能力对象上所有无参 {@code isXxx} / {@code getXxx} 方法全跑一遍并打印。
      *
      * <p>手表端支持哪些特性是由这个对象说了算的。之前只看三个世代开关，
      * 万一真正的开关是别的名字（例如某个 {@code isSupportXxx}），就永远看不见。
