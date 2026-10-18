@@ -233,8 +233,16 @@ public final class FluidUnlockModule extends XposedModule {
             return;
         }
         hook(m).intercept(chain -> {
+            // 先把真实返回值跑出来再覆盖：日志里的 original 才是设备的真实能力，
+            // 是判断「这表到底支不支持」的唯一证据（只看 -> true 等于什么都没看到）。
+            String original;
+            try {
+                original = String.valueOf(chain.proceed());
+            } catch (Throwable t) {
+                original = "threw:" + t.getClass().getSimpleName();
+            }
             logOnce(className + "#" + methodName,
-                    "[GATE] " + className + "#" + methodName + " -> true");
+                    "[GATE] " + className + "#" + methodName + " -> true (original=" + original + ")");
             return Boolean.TRUE;
         });
         log(Log.INFO, TAG, "hooked bool  : " + className + "#" + methodName);
@@ -247,8 +255,14 @@ public final class FluidUnlockModule extends XposedModule {
             return;
         }
         hook(m).intercept(chain -> {
+            String original;
+            try {
+                original = String.valueOf(chain.proceed());
+            } catch (Throwable t) {
+                original = "threw:" + t.getClass().getSimpleName();
+            }
             logOnce(className + "#" + methodName,
-                    "[GATE] " + className + "#" + methodName + " -> " + value);
+                    "[GATE] " + className + "#" + methodName + " -> " + value + " (original=" + original + ")");
             return value;
         });
         log(Log.INFO, TAG, "hooked int   : " + className + "#" + methodName);

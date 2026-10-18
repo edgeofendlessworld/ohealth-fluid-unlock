@@ -198,6 +198,10 @@ final class FluidProbe {
                     sb.append(" | ").append(summarize(a));
                 }
                 sb.append(" | ").append(describeAbility(abilityField));
+                if (!abilityDumped) {
+                    abilityDumped = true;
+                    sb.append(" | abilityFull=").append(describeAbilityFull(abilityField));
+                }
                 if (!isVoid(m)) {
                     sb.append(" => ").append(summarize(result));
                 }
@@ -250,6 +254,58 @@ final class FluidProbe {
             return String.valueOf(m.invoke(target));
         } catch (Throwable t) {
             return "?";
+        }
+    }
+
+    /** 能力对象是否已经整份打印过（只需要一次，用于回答「这只表到底支不支持」）。 */
+    private static volatile boolean abilityDumped;
+
+    /**
+     * 把能力对象上所有无参 {@code is*/get*} 方法全跑一遍并打印。
+     *
+     * <p>手表端支持哪些特性是由这个对象说了算的。之前只看三个世代开关，
+     * 万一真正的开关是别的名字（例如某个 {@code isSupportXxx}），就永远看不见。
+     * 这里不猜字段名，直接把接口上能读的全读出来。
+     */
+    private static String describeAbilityFull(Field abilityField) {
+        if (abilityField == null) {
+            return "ability=?";
+        }
+        try {
+            final Object ability = abilityField.get(null);
+            if (ability == null) {
+                return "ability=null";
+            }
+            final Class<?> type = abilityField.getType();
+            final StringBuilder sb = new StringBuilder(ability.getClass().getName()).append('{');
+            int n = 0;
+            for (Method m : type.getMethods()) {
+                if (m.getParameterCount() != 0 || m.getDeclaringClass() == Object.class) {
+                    continue;
+                }
+                final Class<?> rt = m.getReturnType();
+                if (rt != boolean.class && rt != int.class && rt != String.class) {
+                    continue;
+                }
+                final String name = m.getName();
+                if (!name.startsWith("is") && !name.startsWith("get")) {
+                    continue;
+                }
+                final Object value;
+                try {
+                    m.setAccessible(true);
+                    value = m.invoke(ability);
+                } catch (Throwable t) {
+                    continue;
+                }
+                if (n++ > 0) {
+                    sb.append(", ");
+                }
+                sb.append(name).append('=').append(value);
+            }
+            return sb.append('}').toString();
+        } catch (Throwable t) {
+            return "ability=<" + t.getClass().getSimpleName() + ">";
         }
     }
 

@@ -73,8 +73,13 @@ final class FluidInjector {
      *
      * <p>同时发两种模板，是为了区分「模板选错」和「层级写错」：
      * 两张卡里只要有一张出现字母，问题就只在模板；两张都空白，问题在层级或颜色。
+     *
+     * <p><b>已关闭</b>：两次实测（只撒层级名、再叠加白/红双配色与 compat/common 双模板）
+     * 手表上都是两个全空白框，一个字母都没出现。这说明不是「槽位名猜错」，
+     * 而是这一代手表根本不渲染这类 seeding 卡的内容区 —— 继续喷雾没有信息增益，
+     * 改由能力体检（{@code [GATE] ... original=} 与 {@code abilityFull=}）判断设备是否支持。
      */
-    private static final boolean SLOT_PROBE = true;
+    private static final boolean SLOT_PROBE = false;
 
     /** 诊断模式下每种模板发一张：{@code center:compat}（镜像通知）与 {@code center:common}（通用卡）。 */
     private static final String[] PROBE_TYPES = {"center:compat", "center:common"};
