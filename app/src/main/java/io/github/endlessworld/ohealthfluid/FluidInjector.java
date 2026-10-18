@@ -306,10 +306,14 @@ final class FluidInjector {
                 : null;
         if (icon != null || arrow != null) {
             final ArrayList<Bundle> imageItems = new ArrayList<>(2);
-            // D1：卡片里的大图，原生取自数据源 App 图标
-            imageItems.add(imageItem("D1", icon != null ? icon : arrow));
-            // A1：小图 / 指示窗箭头
-            imageItems.add(imageItem("A1", arrow != null ? arrow : icon));
+            // D1 必须和 A1 用**同一张图**：
+            // ProcessorSeedingCard.applyImageResult 在模板里没有 D1 时，就是拿 A1 的字节合成一张
+            // "md5_D1" 出来 —— 也就是说原生卡的 D1 和 A1 永远是同一张图。
+            // 我们之前把 D1 填成 App 图标、A1 填成箭头，手表指示窗在两个图片层级之间切换，
+            // 就成了「图标 / 箭头+距离」一闪一闪。这里照原生做法让两层完全一致。
+            final byte[] shared = arrow != null ? arrow : icon;
+            imageItems.add(imageItem("D1", shared));
+            imageItems.add(imageItem("A1", shared));
             fluidData.putParcelableArrayList("fluid_images", imageItems);
             imageCount = imageItems.size();
         }
