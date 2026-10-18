@@ -25,8 +25,10 @@ import java.util.ArrayList;
  *   └─ HealthNotificationRegisterCenter.onNotificationFluid(hnb, bundle)  → 推手表
  * </pre>
  *
- * <p>因此本类只需要提供通知的基本字段与 {@code fluid_texts}，
- * 其余由 {@code normalizeFluidBundle} 兜底。
+ * <p>因此本类的 {@code fluid_data} 必须<b>同时</b>满足两套字段契约：
+ * 新协议的 {@code fluid_texts → KEY_TEXTS}，以及旧协议的扁平键
+ * {@code B/B0/B1/C1/C2/C3/D19/D20/DEFAULT_C}（见 {@code ConverterWorker.oldPb}）。
+ * 只喂其中一套时，走另一条分支的手表世代就会渲染出一张空白卡片。
  */
 final class FluidInjector {
 
@@ -132,19 +134,52 @@ final class FluidInjector {
 
         fluidData.putParcelableArrayList("fluid_texts", textItems);
 
+        // ------------------------------------------------------------------
+        // 关键：两套字段契约同时满足。
+        //
+        // ConverterWorker 有新旧两条填充路径，读的是**同一个 bundle**，但键完全不同：
+        //   newPb(hnb, bundle, builder)  读 KEY_TEXTS / KEY_IMAGES（由 normalizeFluidBundle
+        //                                从 fluid_texts 归一化出来，上面已经有了）
+        //   oldPb(bundle, builder)       读**扁平字符串键**：
+        //                                  B / B0 / B1  → setB / setB0 / setB1
+        //                                  C1 / C2 / C3  → setC1 / setC2 / setC3
+        //                                  *_COLOR       → 各层颜色
+        //                                  D19 / D20     → 图片
+        //                                且当 C1/C2/C3 全为空时，C1 回落 DEFAULT_C。
+        //
+        // 之前只喂了 fluid_texts：走 newPb 的世代没问题，走 oldPb 的世代就只剩
+        // 一个空的 DEFAULT_C 回落值 —— 卡片是空白的。这里把扁平键也一起写进去。
+        // ------------------------------------------------------------------
+        final String titleSafe = title == null ? "" : title;
+        final String textSafe = text == null ? "" : text;
+
+        // DEFAULT_C 必须放在 fluid_data **里面**：normalizeFluidBundle 是从
+        // fluidData 里 getString("DEFAULT_C", "流体云样例") 读的，
+        // 放在外层 extras 上等于没生效（日志里一直回落成"流体云样例"）。
+        fluidData.putString(DEFAULT_C, titleSafe);
+
+        // 旧协议扁平键：B1 = 标题，C1 = 正文（与 extractAndValidateTitleDes 一致）
+        if (!titleSafe.isEmpty()) {
+            fluidData.putString("B1", titleSafe);
+        }
+        if (!textSafe.isEmpty()) {
+            fluidData.putString("C1", textSafe);
+        } else if (!titleSafe.isEmpty()) {
+            // 正文缺失时用标题兜底，避免旧协议下 C1 落到 DEFAULT_C 变成一行重复字
+            fluidData.putString("C1", titleSafe);
+        }
+
         final Bundle extras = new Bundle();
         extras.putString("sbn_package", pkg);
-        extras.putString("sbn_title", title == null ? "" : title);
-        extras.putString("sbn_text", text == null ? "" : text);
+        extras.putString("sbn_title", titleSafe);
+        extras.putString("sbn_text", textSafe);
         extras.putInt("sbn_id", (int) (System.currentTimeMillis() & 0x7fffffff));
         extras.putBundle("fluid_data", fluidData);
 
-        // 默认文案（normalizeFluidBundle 读取，缺失时回落"流体云样例"）
-        extras.putString(DEFAULT_C, title == null ? "" : title);
-
         Log.i(TAG, "[INJECT] extras: pkg=" + pkg
                 + ", texts=" + textItems.size()
-                + " (" + LEVEL_TITLE + "=" + title + ", " + LEVEL_CONTENT + "=" + text + ")");
+                + " (" + LEVEL_TITLE + "=" + title + ", " + LEVEL_CONTENT + "=" + text + ")"
+                + ", legacy B1/C1 + DEFAULT_C in fluid_data");
 
         return extras;
     }
