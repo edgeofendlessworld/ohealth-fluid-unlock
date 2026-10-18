@@ -41,6 +41,16 @@ public final class FluidUnlockModule extends XposedModule {
     /** 用于给 [GATE] 日志去重，避免高频方法刷屏。 */
     private static final Set<String> GATE_LOGGED = ConcurrentHashMap.newKeySet();
 
+    /**
+     * 把卡片模板钉成 {@code center:compat}。
+     *
+     * <p>{@code ConverterWorker.newPb} 在第 811-827 行选模板：缺 {@code KEY_TYPES} 时
+     * 落到 {@code "center:common"}；只有当 {@code isNewPbFieldCompat()} 与
+     * {@code FluidConfigCenter.compatMode(pkg)} 同时为真时，才会用 {@code "center:compat"} ——
+     * 那是「把一条普通通知镜像成卡片」的模板，对字段要求最少，最贴近我们的用法。
+     */
+    private static final boolean FORCE_COMPAT_TEMPLATE = true;
+
     @Override
     public void onPackageReady(PackageReadyParam param) {
         if (!TARGET_PKG.equals(param.getPackageName())) {
@@ -124,6 +134,12 @@ public final class FluidUnlockModule extends XposedModule {
 
         // 6) 兜底：把 FluidManager 的支持标志位钉死，摆脱对单个判定方法的依赖
         hookSupportFlag(cl);
+
+        // 7) 卡片模板：让 newPb 选中 center:compat（镜像普通通知）而不是 center:common
+        if (FORCE_COMPAT_TEMPLATE) {
+            hookBool(cl, "com.heytap.health.watch.notification.impl.fluid.FluidConfigCenter",
+                    "compatMode", "java.lang.String");
+        }
     }
 
     /**

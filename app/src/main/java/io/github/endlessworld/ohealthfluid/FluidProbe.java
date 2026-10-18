@@ -33,6 +33,11 @@ final class FluidProbe {
 
     private static Sink sSink;
 
+    /** protobuf 的元方法，打印字段时跳过。 */
+    private static final Set<String> SCALAR_SKIP = new java.util.HashSet<>(java.util.Arrays.asList(
+            "getClass", "getSerializedSize", "getDefaultInstanceForType", "getParserForType",
+            "getDescriptor", "getDescriptorForType", "getUnknownFields"));
+
     private static final String CONVERTER =
             "com.heytap.health.watch.notification.impl.transceiver.convert.ConverterWorker";
     private static final String CLOUD_PUSH =
@@ -162,6 +167,7 @@ final class FluidProbe {
             // 用字段声明类型（公开的能力接口）取方法，避免实现类不可访问导致 IllegalAccessException
             final Class<?> type = abilityField.getType();
             return "isNewPbField=" + invokeBool(type, ability, "isNewPbField")
+                    + ", isNewPbFieldCompat=" + invokeBool(type, ability, "isNewPbFieldCompat")
                     + ", isOldFluid=" + invokeBool(type, ability, "isOldFluid")
                     + ", isSupportWebp=" + invokeBool(type, ability, "isSupportWebp");
         } catch (Throwable t) {
@@ -317,6 +323,31 @@ final class FluidProbe {
         }
         final StringBuilder sb = new StringBuilder(simpleName(proto.getClass().getName()));
         try {
+            // 标量字段：type / notifyLevel / dismissOnce / dataSourcePkg 这些决定
+            // 手表选哪套模板，必须看到
+            int scalars = 0;
+            for (Method m : proto.getClass().getMethods()) {
+                final String name = m.getName();
+                if (!name.startsWith("get") || name.endsWith("List") || m.getParameterCount() != 0) {
+                    continue;
+                }
+                if (SCALAR_SKIP.contains(name)) {
+                    continue;
+                }
+                final Class<?> ret = m.getReturnType();
+                if (ret != String.class && ret != int.class && ret != long.class
+                        && ret != boolean.class && ret != float.class && ret != double.class) {
+                    continue;
+                }
+                if (scalars >= 10) {
+                    break;
+                }
+                m.setAccessible(true);
+                final Object value = m.invoke(proto);
+                sb.append(' ').append(Character.toLowerCase(name.charAt(3)))
+                        .append(name.substring(4)).append('=').append(value);
+                scalars++;
+            }
             for (Method m : proto.getClass().getMethods()) {
                 final String name = m.getName();
                 if (!name.startsWith("get") || !name.endsWith("List") || m.getParameterCount() != 0) {
@@ -360,16 +391,50 @@ final class FluidProbe {
             return simpleName(e.getClass().getName());
         }
         final StringBuilder sb = new StringBuilder(simpleName(e.getClass().getName())).append('{');
+        boolean first = true;
         if (level != null) {
             sb.append("level=").append(level);
+            first = false;
         }
         if (text != null) {
-            sb.append(level == null ? "" : ", ").append("text=").append(text);
+            if (!first) {
+                sb.append(", ");
+            }
+            sb.append("text=").append(text);
+            first = false;
         }
         if (imageKey != null) {
-            sb.append(level == null && text == null ? "" : ", ").append("imageKey=").append(imageKey);
+            if (!first) {
+                sb.append(", ");
+            }
+            sb.append("imageKey=").append(imageKey);
+            first = false;
+        }
+        // 颜色是「有卡片但全白」的关键：白字配浅底等于看不见
+        final String color = callColor(e, "getColor");
+        if (color != null) {
+            sb.append(", color=").append(color);
+            first = false;
+        }
+        final String bg = callColor(e, "getBgColor");
+        if (bg != null) {
+            sb.append(", bg=").append(bg);
         }
         return sb.append('}').toString();
+    }
+
+    /** 把 int 颜色打成 #AARRGGBB，便于和设计稿/官方卡片对照。 */
+    private static String callColor(Object target, String getter) {
+        try {
+            final Method m = target.getClass().getMethod(getter);
+            if (m.getReturnType() != int.class) {
+                return null;
+            }
+            m.setAccessible(true);
+            return String.format("#%08X", (Integer) m.invoke(target));
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     private static String callString(Object target, String getter) {
