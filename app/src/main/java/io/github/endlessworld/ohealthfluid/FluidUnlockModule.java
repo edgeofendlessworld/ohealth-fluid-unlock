@@ -55,6 +55,17 @@ public final class FluidUnlockModule extends XposedModule {
      */
     private static final boolean FORCE_COMPAT_TEMPLATE = false;
 
+    /**
+     * 每次下发都把 {@code SeedingCardStyleProto.updateIndicator} 钉成 2。
+     *
+     * <p>{@code ConverterWorker.isDuplicateFluidSeedingCard} 的规则是：
+     * 指示器元素（A1/A/A0 图 + B/B0 文本）变了才写 2，否则写 1。
+     * 原生导航卡每帧都在改距离，所以恒为 2；我们抠到的距离文案不是每帧都变，
+     * 于是 1/2 交替 —— 手表桌面指示窗跟着在“箭头”和“距离”之间跳。
+     * 钉死 2 之后每次都走“刷新指示窗”这条路。
+     */
+    private static final boolean FORCE_INDICATOR_REFRESH = true;
+
     @Override
     public void onPackageReady(PackageReadyParam param) {
         if (!TARGET_PKG.equals(param.getPackageName())) {
@@ -147,6 +158,61 @@ public final class FluidUnlockModule extends XposedModule {
 
         // 8) 震动档位：把 normalizeFluidBundle 硬写的“重要”盖回我们想要的档位
         hookNotifyLevel(cl);
+
+        // 9) 桌面指示窗：每次下发都标记“指示器元素已变”，让指示窗持续刷新
+        if (FORCE_INDICATOR_REFRESH) {
+            hookForceIndicator(cl);
+        }
+    }
+
+    /**
+     * 桌面指示窗刷新。
+     *
+     * <p>{@code ConverterWorker.isDuplicateFluidSeedingCard} 末尾会根据
+     * {@code isIndicatorElementChanged} 把 builder 的 {@code updateIndicator} 写成 2 或 1。
+     * 这里在它返回后统一改成 2 —— 手表桌面指示窗只在 2 的时候刷新，
+     * 恒为 1 时就会出现「箭头和距离交替」。
+     *
+     * <p>只改 proto 字段，重复卡的去重判断仍然沿用原逻辑（返回值不碰）。
+     */
+    private void hookForceIndicator(ClassLoader cl) {
+        final String cls = "com.heytap.health.watch.notification.impl.transceiver.convert"
+                + ".ConverterWorker";
+        try {
+            final Class<?> c = Class.forName(cls, false, cl);
+            Method target = null;
+            for (Method m : c.getDeclaredMethods()) {
+                if ("isDuplicateFluidSeedingCard".equals(m.getName())) {
+                    target = m;
+                    break;
+                }
+            }
+            if (target == null) {
+                logSoft("hookForceIndicator", cls + "#isDuplicateFluidSeedingCard",
+                        new NoSuchMethodException("not found"));
+                return;
+            }
+            target.setAccessible(true);
+            hook(target).intercept(chain -> {
+                final Object result = chain.proceed();
+                for (Object arg : chain.getArgs()) {
+                    if (arg != null
+                            && arg.getClass().getName().contains("SeedingCardStyleProto$Builder")) {
+                        try {
+                            arg.getClass().getMethod("setUpdateIndicator", int.class)
+                                    .invoke(arg, 2);
+                        } catch (Throwable ignored) {
+                            // proto 版本不同就先算了，指示窗退回原生节奏
+                        }
+                    }
+                }
+                return result;
+            });
+            log(Log.INFO, TAG, "hooked indicator: " + cls + "#isDuplicateFluidSeedingCard"
+                    + " -> updateIndicator=2");
+        } catch (Throwable t) {
+            logSoft("hookForceIndicator", cls + "#isDuplicateFluidSeedingCard", t);
+        }
     }
 
     /**

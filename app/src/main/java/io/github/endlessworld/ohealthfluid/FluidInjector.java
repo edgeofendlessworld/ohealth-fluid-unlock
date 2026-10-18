@@ -284,7 +284,6 @@ final class FluidInjector {
         if (!indicator.isEmpty()) {
             textItems.add(textItem(LEVEL_INDICATOR, indicator, palette));
         }
-
         fluidData.putParcelableArrayList("fluid_texts", textItems);
 
         // ------------------------------------------------------------------
@@ -303,7 +302,7 @@ final class FluidInjector {
         final byte[] icon = appIconPng(pkg);
         // A1 同时也是桌面指示窗里的「方位」图标，这里放方向箭头而不是 App 图标
         final byte[] arrow = probeType == null
-                ? turnArrowPng(effText.isEmpty() ? effTitle : effText)
+                ? turnArrowPng(effTitle + " " + effText, distanceText(effTitle, effText))
                 : null;
         if (icon != null || arrow != null) {
             final ArrayList<Bundle> imageItems = new ArrayList<>(2);
@@ -442,20 +441,33 @@ final class FluidInjector {
      * 随转向变化，而不是永远一片空白。
      */
     private static String indicatorText(String title, String text) {
+        final String distance = distanceText(title, text);
+        if (!distance.isEmpty()) {
+            return distance;
+        }
+        final String all = (title == null ? "" : title) + " " + (text == null ? "" : text);
+        return turnLabel(all);
+    }
+
+    /**
+     * 从文案里抠出距离（{@code 9米} / {@code 1.2公里}），单位统一成「米 / 公里」。
+     * 抠不到返回空串。
+     */
+    private static String distanceText(String title, String text) {
         final String all = (title == null ? "" : title) + " " + (text == null ? "" : text);
         final java.util.regex.Matcher m = java.util.regex.Pattern
                 .compile("([0-9]+(?:\\.[0-9]+)?)\\s*(公里|千米|米|km|KM|m)")
                 .matcher(all);
-        if (m.find()) {
-            String unit = m.group(2);
-            if ("km".equalsIgnoreCase(unit) || "千米".equals(unit)) {
-                unit = "公里";
-            } else if ("m".equals(unit)) {
-                unit = "米";
-            }
-            return m.group(1) + unit;
+        if (!m.find()) {
+            return "";
         }
-        return turnLabel(all);
+        String unit = m.group(2);
+        if ("km".equalsIgnoreCase(unit) || "千米".equals(unit)) {
+            unit = "公里";
+        } else if ("m".equals(unit)) {
+            unit = "米";
+        }
+        return m.group(1) + unit;
     }
 
     /**
@@ -563,16 +575,30 @@ final class FluidInjector {
      * <p>原生导航卡的箭头来自云端模板（webp 资源），我们拿不到，所以按通知里的
      * 方向词自己画一个：直行 / 左转 / 右转 / 左前右前 / 掉头。
      * 尺寸取 120，与 {@code getDefaultImageBean} 里原生的图标宽度一致。
+     *
+     * <p>有距离时把距离一起画进图里：手表桌面指示窗只认 {@code A1/A/A0} 图 +
+     * {@code B/B0} 文本，两个槽位分别渲染会变成「箭头 / 距离」交替；
+     * 合成一张图至少保证画面里箭头和距离同时在场。
      */
-    private static byte[] turnArrowPng(String text) {
+    private static byte[] turnArrowPng(String text, String distance) {
         try {
             final int size = 120;
             final android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(
                     size, size, android.graphics.Bitmap.Config.ARGB_8888);
             final android.graphics.Canvas canvas = new android.graphics.Canvas(bmp);
             canvas.drawColor(0x00000000);
+
+            final boolean withText = distance != null && !distance.isEmpty();
+            // 带文字时把箭头压到上半部分，底部留给距离
+            final float headTop = withText ? size * 0.05f : size * 0.12f;
+            final float headBase = withText ? size * 0.34f : size * 0.44f;
+            final float shaftBottom = withText ? size * 0.58f : size * 0.85f;
+            final float headHalf = withText ? 22f : 26f;
+            final float shaftHalf = withText ? 7f : 9f;
+            final float pivotY = withText ? size * 0.31f : size / 2f;
+
             canvas.save();
-            canvas.rotate(turnAngle(text), size / 2f, size / 2f);
+            canvas.rotate(turnAngle(text), size / 2f, pivotY);
 
             final android.graphics.Paint paint = new android.graphics.Paint();
             paint.setAntiAlias(true);
@@ -581,15 +607,30 @@ final class FluidInjector {
 
             final float cx = size / 2f;
             // 箭头杆
-            canvas.drawRect(cx - 9f, size * 0.40f, cx + 9f, size * 0.85f, paint);
+            canvas.drawRect(cx - shaftHalf, headBase, cx + shaftHalf, shaftBottom, paint);
             // 箭头头
             final android.graphics.Path head = new android.graphics.Path();
-            head.moveTo(cx, size * 0.12f);
-            head.lineTo(cx + 26f, size * 0.44f);
-            head.lineTo(cx - 26f, size * 0.44f);
+            head.moveTo(cx, headTop);
+            head.lineTo(cx + headHalf, headBase);
+            head.lineTo(cx - headHalf, headBase);
             head.close();
             canvas.drawPath(head, paint);
             canvas.restore();
+
+            if (withText) {
+                final android.graphics.Paint textPaint = new android.graphics.Paint();
+                textPaint.setAntiAlias(true);
+                textPaint.setColor(0xFFFFFFFF);
+                textPaint.setTextAlign(android.graphics.Paint.Align.CENTER);
+                textPaint.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+                float textSize = 34f;
+                textPaint.setTextSize(textSize);
+                while (textSize > 12f && textPaint.measureText(distance) > size * 0.94f) {
+                    textSize -= 2f;
+                    textPaint.setTextSize(textSize);
+                }
+                canvas.drawText(distance, size / 2f, size * 0.94f, textPaint);
+            }
 
             final java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
             bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out);
