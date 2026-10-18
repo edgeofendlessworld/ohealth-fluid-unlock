@@ -39,16 +39,14 @@ final class NotificationBridge {
     /**
      * 是否把第三方通知伪造成卡片。
      *
-     * <p><b>当前关闭，用于对照实验</b>：设备能力已确认支持（{@code isWatch4Gen=true}、
-     * {@code isSupportFluid=true}、{@code isSupportWebp=true}），但我们伪造的载荷在手表上
-     * 只画出空白框。先关掉伪造，让 OPPO 健康自己处理百度地图这类内置白名单应用的通知，
-     * 再对比手表表现：
-     * <ul>
-     *   <li>原生卡片能显示内容 → 我们的伪造协议不对，照原生的键重做；</li>
-     *   <li>原生卡片同样空白 → 空白框与载荷无关，是手表端模板/云端配置的问题。</li>
-     * </ul>
+     * <p>对照实验做过一轮（关掉伪造、只留闸门），原生链路对百度地图这类通知<b>完全不产卡</b>：
+     * {@code FluidManager.sendCardData} / {@code CloudPushManager.cloudPush} 一次都没命中，
+     * 只有我们自己的注入进得来。所以卡片内容只能由我们来喂，这里重新打开。
+     *
+     * <p>随之补上的载荷（见 {@code FluidInjector}）：原生卡片必带的 {@code KEY_IMAGES}
+     * （D1 大图 + A1 小图，来自数据源 App 图标）和 {@code KEY_TYPES} 模板键。
      */
-    private static final boolean BRIDGE_ENABLED = false;
+    private static final boolean BRIDGE_ENABLED = true;
 
     private NotificationBridge() {
     }

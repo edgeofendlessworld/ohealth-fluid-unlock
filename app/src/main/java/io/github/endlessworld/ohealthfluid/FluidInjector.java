@@ -220,6 +220,32 @@ final class FluidInjector {
         fluidData.putParcelableArrayList("fluid_texts", textItems);
 
         // ------------------------------------------------------------------
+        // 图片：原生卡片的 KEY_IMAGES 里**必定**同时有 D1（大图）与 A1（小图）两层。
+        //
+        // 依据 ProcessorSeedingCard.applyImageResult：模板里没有 D1 时，它会拿 A1 / A / A0
+        // 兜底合成一张 D1；再没有就调 getDefaultImageBean("D1", …)，而那个方法取的是
+        // FluidConfigCenter 白名单应用表里该 App 的图标（PNG、宽 120）。也就是说
+        // **一张真实的卡片绝不会没有图**。我们之前一张图都没给，是结构上和原生差得最远的地方。
+        //
+        // ImageBean 的 md5 由 parseImageItems 自己按 bytes 算（也可以显式给 "md5" 键），
+        // 新协议里 imageKey = md5 + "_" + level，图片字节本身由 convertFluid 里的
+        // sendImages(bundle) 单独发一次，所以这里只要把 level + bytes 填对。
+        // ------------------------------------------------------------------
+        int imageCount = 0;
+        final byte[] icon = appIconPng(pkg);
+        if (icon != null) {
+            final ArrayList<Bundle> imageItems = new ArrayList<>(2);
+            imageItems.add(imageItem("D1", icon));
+            imageItems.add(imageItem("A1", icon));
+            fluidData.putParcelableArrayList("fluid_images", imageItems);
+            imageCount = imageItems.size();
+        }
+
+        // KEY_TYPES：原生卡片由 ProcessorSeedingCard 从云端模板节点算出（形如 center:compat），
+        // 缺这个键时 ConverterWorker.newPb 会落到 center:common。这里显式给镜像通知用的模板。
+        fluidData.putString("KEY_TYPES", "center:compat");
+
+        // ------------------------------------------------------------------
         // 关键：两套字段契约同时满足。
         //
         // ConverterWorker 有新旧两条填充路径，读的是**同一个 bundle**，但键完全不同：
@@ -277,7 +303,8 @@ final class FluidInjector {
         Log.i(TAG, "[INJECT] extras: pkg=" + pkg
                 + ", texts=" + textItems.size()
                 + " (" + LEVEL_TITLE + "=" + effTitle + ", " + LEVEL_CONTENT + "=" + effText + ")"
-                + ", legacy B1/C1 + DEFAULT_C in fluid_data"
+                + ", images=" + imageCount + (imageCount == 0 ? " (缺少图标!)" : " (D1+A1)")
+                + ", KEY_TYPES=center:compat, legacy B1/C1 + DEFAULT_C in fluid_data"
                 + (probeType == null ? "" : ", probe_type_override=" + probeType + ", palette=" + paletteTag));
 
         return extras;
@@ -296,6 +323,65 @@ final class FluidInjector {
         item.putInt("color", color);
         item.putInt("bg_color", 0);      // 透明
         return item;
+    }
+
+    /**
+     * 单个 {@code fluid_images} 元素；键名与 {@code parseImageItems} 的读取保持一致
+     * （{@code level} / {@code bytes} / {@code square}，md5 由那边按字节算）。
+     */
+    private static Bundle imageItem(String level, byte[] bytes) {
+        final Bundle item = new Bundle();
+        item.putString("level", level);
+        item.putByteArray("bytes", bytes);
+        item.putBoolean("square", false);
+        return item;
+    }
+
+    /**
+     * 取数据源 App 的图标，压成 PNG。
+     *
+     * <p>对应原生 {@code ProcessorBase.getDefaultImageBean} 的兜底逻辑：真实卡片缺图时
+     * 会用白名单应用表里的图标补一张（PNG、宽 120）。我们直接取系统图标，效果等价。
+     */
+    private static byte[] appIconPng(String pkg) {
+        try {
+            final android.content.Context ctx = appContext();
+            if (ctx == null) {
+                return null;
+            }
+            final android.graphics.drawable.Drawable d =
+                    ctx.getPackageManager().getApplicationIcon(pkg);
+            android.graphics.Bitmap bmp;
+            if (d instanceof android.graphics.drawable.BitmapDrawable) {
+                bmp = ((android.graphics.drawable.BitmapDrawable) d).getBitmap();
+            } else {
+                final int w = Math.max(1, d.getIntrinsicWidth());
+                final int h = Math.max(1, d.getIntrinsicHeight());
+                bmp = android.graphics.Bitmap.createBitmap(w, h,
+                        android.graphics.Bitmap.Config.ARGB_8888);
+                final android.graphics.Canvas canvas = new android.graphics.Canvas(bmp);
+                d.setBounds(0, 0, w, h);
+                d.draw(canvas);
+            }
+            final java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out);
+            return out.toByteArray();
+        } catch (Throwable t) {
+            Log.w(TAG, "[INJECT] icon failed for " + pkg + ": " + t.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    /** 当前进程的 Application；模组运行在 App 进程里，可直接取到。 */
+    private static android.content.Context appContext() {
+        try {
+            final Class<?> at = Class.forName("android.app.ActivityThread");
+            final Object thread = at.getMethod("currentActivityThread").invoke(null);
+            final Object app = thread == null ? null : at.getMethod("getApplication").invoke(thread);
+            return app instanceof android.content.Context ? (android.content.Context) app : null;
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     /** 颜色名，用于写进诊断文本，让手表上的字自己说出它是什么颜色。 */
