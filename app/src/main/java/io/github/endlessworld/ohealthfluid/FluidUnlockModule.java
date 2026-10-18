@@ -57,6 +57,10 @@ public final class FluidUnlockModule extends XposedModule {
         hookGates(cl);
         hookObservers(cl);
 
+        // 全链路只读探针：convertFluidNew / newPb / oldPb / cloudPush
+        // （之前一直没接进来，所以日志里只有 [OBS]/[GATE]，看不到卡片到底断在哪一环）
+        FluidProbe.install(cl, this);
+
         // 方案 A：解锁「设备 → 通知 → 流体云」设置页
         FluidGate.install(cl, this);
 
@@ -173,10 +177,25 @@ public final class FluidUnlockModule extends XposedModule {
                 "getSupportApp", "java.lang.String");
 
         // D. 外部注入通道：观察是否有人在用广播喂数据
-        observe(cl, "com.heytap.health.watch.notification.impl.fluid.external.ExternalFluidCloudInjector",
-                "doInject", "android.os.Bundle");
-        observe(cl, "com.heytap.health.watch.notification.impl.fluid.external.ExternalFluidCloudInjector",
-                "doRemove", "android.os.Bundle");
+        final String injector =
+                "com.heytap.health.watch.notification.impl.fluid.external.ExternalFluidCloudInjector";
+        observe(cl, injector, "doInject", "android.os.Bundle");
+        observe(cl, injector, "doRemove", "android.os.Bundle");
+
+        // E. doInject 内部的四个判定/转换点 —— 判断注入是「被设备能力拦下」
+        //    还是「转换后字段为空」，这两者修法完全不同。
+        observe(cl, injector, "isFluidTypeSupported", "android.os.Bundle");   // 设备能力闸门
+        observe(cl, injector, "normalizeFluidBundle",
+                "android.os.Bundle", "java.lang.String");                     // 真正下发的 bundle
+        observe(cl, injector, "parseTextItems", "android.os.Bundle");         // fluid_texts → TextBean
+        observe(cl, injector, "parseImageItems", "android.os.Bundle");        // fluid_images → ImageBean
+        observe(cl, injector, "pickLargeIcon", "android.os.Bundle");          // D1/A1 图标
+
+        // F. 手表世代：决定走 newPb(KEY_TEXTS) 还是 oldPb(B/B0/B1/C1..) 两套字段契约
+        final String ability = "com.heytap.health.watch.notification.impl.ability.NotificationAbility$Info";
+        observe(cl, ability, "isNewPbField");
+        observe(cl, ability, "isOldFluid");
+        observe(cl, ability, "isSupportWebp");
     }
 
     // ------------------------------------------------------------------
@@ -218,26 +237,36 @@ public final class FluidUnlockModule extends XposedModule {
             return;
         }
         final String label = simpleName(className) + "#" + methodName;
-        hook(m).intercept(chain -> {
-            final Object result;
-            try {
-                result = chain.proceed();
-            } catch (Throwable t) {
-                log(Log.WARN, TAG, "[OBS] " + label + " threw: " + t);
-                throw t;
-            }
-            final StringBuilder sb = new StringBuilder("[OBS] ").append(label);
-            final List<Object> args = chain.getArgs();
-            for (int i = 0; i < args.size(); i++) {
-                sb.append(i == 0 ? " (" : ", ").append(summarize(args.get(i)));
-            }
-            if (!args.isEmpty()) {
-                sb.append(')');
-            }
-            sb.append(" => ").append(summarize(result));
-            log(Log.INFO, TAG, sb.toString());
-            return result;
-        });
+        final boolean returnsVoid = m.getReturnType() == void.class;
+        try {
+            hook(m).intercept(chain -> {
+                final Object result;
+                try {
+                    result = chain.proceed();
+                } catch (Throwable t) {
+                    log(Log.WARN, TAG, "[OBS] " + label + " threw: " + t);
+                    throw t;
+                }
+                final StringBuilder sb = new StringBuilder("[OBS] ").append(label);
+                final List<Object> args = chain.getArgs();
+                for (int i = 0; i < args.size(); i++) {
+                    sb.append(i == 0 ? " (" : ", ").append(summarize(args.get(i)));
+                }
+                if (!args.isEmpty()) {
+                    sb.append(')');
+                }
+                // void 方法不要打印 "=> null"，之前那条 doInject => null 是被这句误导的
+                if (!returnsVoid) {
+                    sb.append(" => ").append(summarize(result));
+                }
+                log(Log.INFO, TAG, sb.toString());
+                return result;
+            });
+        } catch (Throwable t) {
+            // 接口默认方法 / 抽象方法在某些框架下无法 hook：跳过，不影响其它探针
+            log(Log.INFO, TAG, "SKIP observe " + label + ": " + t.getClass().getSimpleName());
+            return;
+        }
         log(Log.INFO, TAG, "observed     : " + className + "#" + methodName);
     }
 
@@ -344,10 +373,52 @@ public final class FluidUnlockModule extends XposedModule {
         if (o instanceof CharSequence || o instanceof Number || o instanceof Boolean) {
             return String.valueOf(o);
         }
+        // parseTextItems / parseImageItems 返回的 ArrayList<TextBean|ImageBean>：
+        // 逐项打印 level/text，这是判断「层级对不对」最直接的证据。
+        if (o instanceof List) {
+            final List<?> list = (List<?>) o;
+            final StringBuilder sb = new StringBuilder("List(size=").append(list.size()).append(")[");
+            for (int i = 0; i < list.size(); i++) {
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                sb.append(describeElement(list.get(i)));
+            }
+            return sb.append(']').toString();
+        }
         if (o instanceof Parcelable) {
-            return o.getClass().getSimpleName();
+            return describeElement(o);
         }
         return o.getClass().getName();
+    }
+
+    /** Bean 类摘要：优先取 level + text（TextBean / ImageBean 都有 getLevel）。 */
+    private static String describeElement(Object e) {
+        if (e == null) {
+            return "null";
+        }
+        try {
+            final String level = callString(e, "getLevel");
+            final String text = callString(e, "getText");
+            if (level != null || text != null) {
+                return simpleName(e.getClass().getName())
+                        + "{level=" + level + ", text=" + text + "}";
+            }
+        } catch (Throwable ignored) {
+            // 落到下面的通用分支
+        }
+        return simpleName(e.getClass().getName());
+    }
+
+    private static String callString(Object target, String getter) {
+        try {
+            final Method m = target.getClass().getMethod(getter);
+            m.setAccessible(true);
+            final Object v = m.invoke(target);
+            return v == null ? null : String.valueOf(v);
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     /** 打印 Bundle 的全部键值，字节数组只显示长度。 */
