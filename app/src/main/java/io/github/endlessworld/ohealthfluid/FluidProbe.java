@@ -97,7 +97,75 @@ final class FluidProbe {
         // 4) 真正推送到手表
         observe(cl, xp, CLOUD_PUSH, "cloudPush", BEAN);
 
+        diagOnce();
         log("[PROBE] install() done");
+    }
+
+    /** 环境体检只做一次；install 时可能还没有 Context，所以命中链路时再补一次。 */
+    private static volatile boolean diagDone;
+
+    static void diagOnce() {
+        if (diagDone) {
+            return;
+        }
+        diagDone = true;
+        diagEnvironment();
+    }
+
+    /**
+     * 环境体检：空白框的一个强候选根因是「手机端没有潘塔纳尔」。
+     *
+     * <p>手表端卡片模板、层级映射、云端配置都由 {@code com.oplus.pantanal.ums}
+     * （潘塔纳尔 UMS，即手机状态栏流体云/灵动岛的宿主）下发。手机如果不是 ColorOS、
+     * 或该系统包被精简/未激活，我们发出去的载荷就只是「一串没人认领的数据」——
+     * 手表能画出卡片外框，却没有任何模板去渲染里面的字段。
+     *
+     * <p>这里不猜，直接把机型、ROM、几个关键系统包的版本打出来。
+     */
+    private static void diagEnvironment() {
+        try {
+            log("[DIAG] device=" + android.os.Build.MANUFACTURER + "/" + android.os.Build.BRAND
+                    + " model=" + android.os.Build.MODEL
+                    + " rom=" + android.os.Build.DISPLAY
+                    + " android=" + android.os.Build.VERSION.RELEASE
+                    + " sdk=" + android.os.Build.VERSION.SDK_INT);
+        } catch (Throwable t) {
+            log("[DIAG] build info failed: " + t);
+        }
+
+        android.content.Context ctx = null;
+        try {
+            final Class<?> at = Class.forName("android.app.ActivityThread");
+            final Object thread = at.getMethod("currentActivityThread").invoke(null);
+            final Object app = thread == null ? null
+                    : at.getMethod("getApplication").invoke(thread);
+            if (app instanceof android.content.Context) {
+                ctx = (android.content.Context) app;
+            }
+        } catch (Throwable t) {
+            log("[DIAG] context lookup failed: " + t.getClass().getSimpleName());
+        }
+        if (ctx == null) {
+            log("[DIAG] context=null（包管理器查询跳过，等下一次命中再补）");
+            diagDone = false;
+            return;
+        }
+
+        final String[] pkgs = {
+                "com.oplus.pantanal.ums",
+                "com.heytap.health",
+                "com.coloros.scenemode",
+                "com.oplus.ocs",
+        };
+        for (String pkg : pkgs) {
+            try {
+                final android.content.pm.PackageInfo pi =
+                        ctx.getPackageManager().getPackageInfo(pkg, 0);
+                log("[DIAG] " + pkg + " = " + pi.versionName + " (" + pi.getLongVersionCode() + ")");
+            } catch (Throwable t) {
+                log("[DIAG] " + pkg + " = ABSENT (" + t.getClass().getSimpleName() + ")");
+            }
+        }
     }
 
     /** {@code "center:compat"}：把一条普通通知镜像成卡片的模板，对字段要求最少。 */
@@ -193,6 +261,7 @@ final class FluidProbe {
                     log("[PROBE] " + label + " threw: " + t);
                     throw t;
                 }
+                diagOnce();
                 final StringBuilder sb = new StringBuilder("[PROBE] ").append(label);
                 for (Object a : chain.getArgs()) {
                     sb.append(" | ").append(summarize(a));
