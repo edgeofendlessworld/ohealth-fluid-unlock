@@ -225,6 +225,8 @@ final class NotificationBridge {
 
         Log.i(TAG, "[BRIDGE] whitelisted notification: pkg=" + pkg + ", id=" + sbn.getId()
                 + ", title=" + title + ", text=" + body);
+        // 方向词/距离到底藏在哪个 extras 键里，靠这行日志判断（12 条上限，已截断）
+        Log.i(TAG, "[BRIDGE] raw: " + FluidInjector.describeRawExtras(sbn));
 
         // 震动策略：只在「关键节点」震一下，而不是每次刷新都震。
         //   1) 通知第一次出现（导航刚起步）→ 震；

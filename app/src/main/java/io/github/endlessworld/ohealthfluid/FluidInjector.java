@@ -396,6 +396,8 @@ final class FluidInjector {
                 + " (" + LEVEL_TITLE + "=" + effTitle + ", " + LEVEL_CONTENT + "=" + effText
                 + (indicator.isEmpty() ? "" : ", " + LEVEL_INDICATOR + "=" + indicator) + ")"
                 + ", images=" + imageCount + (imageCount == 0 ? " (缺少图标!)" : " (D1+A1 箭头)")
+                + ", dir=" + turnLabel(effTitle + " " + effText)
+                + "@" + turnAngle(effTitle + " " + effText) + "°"
                 + ", KEY_TYPES=center:compat, notifyLevel=" + notifyLevel
                 + ", legacy B1/C1 + DEFAULT_C in fluid_data"
                 + (probeType == null ? "" : ", probe_type_override=" + probeType + ", palette=" + paletteTag));
@@ -456,51 +458,93 @@ final class FluidInjector {
         return turnLabel(all);
     }
 
-    /** 文案里的转向词（找不到返回空串），既做指示窗兜底文本，也做「关键节点」判定的可读名。 */
+    /**
+     * 从文案里找方向：先找转向动作（左转/右转…），再找**方位词**（向东北 / 往南 / 正西），
+     * 最后才判断直行。找不到返回空串。
+     *
+     * <p>方位词必须带「向 / 往 / 朝 / 正」前缀或「方向」后缀才认 ——
+     * 否则「山东路」「东直门」这种路名会把箭头带跑偏。
+     */
     private static String turnLabel(String text) {
-        if (text == null) {
+        if (text == null || text.isEmpty()) {
             return "";
         }
-        final String[] labels = {
+        // 1) 转向动作（长的先匹配，避免「左前方」被「左转」抢走）
+        final String[] turns = {
                 "左前方", "右前方", "左后方", "右后方",
+                "左前", "右前", "左后", "右后",
                 "左转", "右转", "掉头", "调头",
-                "直行", "直走", "向左", "向右",
+                "靠左", "靠右", "向左", "向右", "左拐", "右拐",
         };
-        for (String label : labels) {
-            if (text.contains(label)) {
-                return label;
+        for (String turn : turns) {
+            if (text.contains(turn)) {
+                return turn;
+            }
+        }
+        // 2) 方位（八向）
+        final String[] dirs = {"东北", "东南", "西北", "西南", "东", "南", "西", "北"};
+        for (String dir : dirs) {
+            if (text.contains("向" + dir) || text.contains("往" + dir)
+                    || text.contains("朝" + dir) || text.contains("正" + dir)
+                    || text.contains(dir + "方向")) {
+                return dir;
+            }
+        }
+        // 3) 直行
+        final String[] straight = {"直行", "直走", "前行", "继续", "沿"};
+        for (String s : straight) {
+            if (text.contains(s)) {
+                return s;
             }
         }
         return "";
     }
 
-    /** 方向关键词 → 箭头旋转角度（0 = 向上直行，正数顺时针）。 */
+    /** 方向词 → 箭头旋转角度（0 = 向上，正数顺时针）。 */
     private static int turnAngle(String text) {
-        if (text == null) {
-            return 0;
+        switch (turnLabel(text)) {
+            case "左前方":
+            case "左前":
+                return -45;
+            case "右前方":
+            case "右前":
+                return 45;
+            case "左后方":
+            case "左后":
+                return -135;
+            case "右后方":
+            case "右后":
+                return 135;
+            case "左转":
+            case "向左":
+            case "左拐":
+            case "靠左":
+                return -90;
+            case "右转":
+            case "向右":
+            case "右拐":
+            case "靠右":
+                return 90;
+            case "掉头":
+            case "调头":
+                return 180;
+            case "东北":
+                return 45;
+            case "东南":
+                return 135;
+            case "西南":
+                return 225;
+            case "西北":
+                return 315;
+            case "东":
+                return 90;
+            case "南":
+                return 180;
+            case "西":
+                return 270;
+            default:
+                return 0;   // 北 / 直行 / 未命中
         }
-        if (text.contains("左前方") || text.contains("左前")) {
-            return -45;
-        }
-        if (text.contains("右前方") || text.contains("右前")) {
-            return 45;
-        }
-        if (text.contains("左后方") || text.contains("左后")) {
-            return -135;
-        }
-        if (text.contains("右后方") || text.contains("右后")) {
-            return 135;
-        }
-        if (text.contains("左转") || text.contains("向左")) {
-            return -90;
-        }
-        if (text.contains("右转") || text.contains("向右")) {
-            return 90;
-        }
-        if (text.contains("掉头") || text.contains("调头")) {
-            return 180;
-        }
-        return 0;
     }
 
     /**
@@ -626,8 +670,11 @@ final class FluidInjector {
     /**
      * 从 {@link StatusBarNotification} 提取标题与正文。
      *
-     * <p>优先读 {@code Notification.EXTRA_TITLE} / {@code EXTRA_TEXT}，
-     * 回落到 {@code EXTRA_TITLE_BIG} / {@code EXTRA_SUB_TEXT}。
+     * <p>不同 App 把「转向提示 / 当前道路 / 方向」放在完全不同的键里：
+     * 百度地图的步行导航经常只有 {@code EXTRA_TITLE} 和一堆 {@code EXTRA_SUB_TEXT} /
+     * {@code EXTRA_INFO_TEXT} / ticker，高德则爱用 {@code EXTRA_BIG_TEXT}。
+     * 所以这里把<b>所有</b>承载文案的字段都收进来，按出现顺序去重拼成正文 ——
+     * 方向词和距离数字就藏在这些字段里，漏一个就表现为「箭头永远直行」。
      */
     static String[] extractText(StatusBarNotification sbn) {
         if (sbn == null || sbn.getNotification() == null) {
@@ -635,26 +682,73 @@ final class FluidInjector {
         }
         final Notification n = sbn.getNotification();
         final Bundle extras = n.extras;
+
+        String title = "";
+        final StringBuilder joined = new StringBuilder();
+
+        if (extras != null) {
+            title = str(extras.getCharSequence(Notification.EXTRA_TITLE));
+            if (title.isEmpty()) {
+                title = str(extras.getCharSequence(Notification.EXTRA_TITLE_BIG));
+            }
+            appendUnique(joined, extras.getCharSequence(Notification.EXTRA_TEXT));
+            appendUnique(joined, extras.getCharSequence(Notification.EXTRA_BIG_TEXT));
+            appendUnique(joined, extras.getCharSequence(Notification.EXTRA_SUB_TEXT));
+            appendUnique(joined, extras.getCharSequence(Notification.EXTRA_INFO_TEXT));
+            appendUnique(joined, extras.getCharSequence(Notification.EXTRA_SUMMARY_TEXT));
+        }
+        appendUnique(joined, n.tickerText);
+        return new String[]{title, joined.toString()};
+    }
+
+    /**
+     * 把通知里所有「字符串类」extras 键值打出来，用于确认 App 到底把转向/方位放在哪个键。
+     *
+     * <p>只在日志里用，限制条数与长度，免得刷屏。
+     */
+    static String describeRawExtras(StatusBarNotification sbn) {
+        if (sbn == null || sbn.getNotification() == null) {
+            return "";
+        }
+        final Bundle extras = sbn.getNotification().extras;
         if (extras == null) {
-            return new String[]{"", ""};
+            return "";
         }
+        final StringBuilder sb = new StringBuilder();
+        int n = 0;
+        for (String key : extras.keySet()) {
+            if (key == null || key.startsWith("android.") || key.startsWith("com.android.")) {
+                continue;   // 系统自带的 action/进度条之类的噪声
+            }
+            final Object v = extras.get(key);
+            if (!(v instanceof CharSequence) && !(v instanceof String[])) {
+                continue;
+            }
+            if (n++ >= 12) {
+                sb.append(" ...");
+                break;
+            }
+            if (sb.length() > 0) {
+                sb.append(", ");
+            }
+            String value = v instanceof String[] ? String.join("/", (String[]) v) : str(v);
+            if (value.length() > 60) {
+                value = value.substring(0, 60) + "…";
+            }
+            sb.append(key).append('=').append(value);
+        }
+        return sb.toString();
+    }
 
-        String title = str(extras.getCharSequence(Notification.EXTRA_TITLE));
-        String text = str(extras.getCharSequence(Notification.EXTRA_TEXT));
-
-        if (title.isEmpty()) {
-            title = str(extras.getCharSequence(Notification.EXTRA_TITLE_BIG));
+    private static void appendUnique(StringBuilder sb, CharSequence cs) {
+        final String value = str(cs).trim();
+        if (value.isEmpty() || sb.indexOf(value) >= 0) {
+            return;
         }
-        if (text.isEmpty()) {
-            text = str(extras.getCharSequence(Notification.EXTRA_BIG_TEXT));
+        if (sb.length() > 0) {
+            sb.append("  ");
         }
-        if (text.isEmpty()) {
-            text = str(extras.getCharSequence(Notification.EXTRA_SUB_TEXT));
-        }
-        if (text.isEmpty()) {
-            text = str(extras.getCharSequence(Notification.EXTRA_SUMMARY_TEXT));
-        }
-        return new String[]{title, text};
+        sb.append(value);
     }
 
     /**
