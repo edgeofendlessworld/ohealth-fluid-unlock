@@ -23,7 +23,8 @@ import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
  *       App 自带白名单应用的数据究竟能不能流到“推送手表”这一步。</li>
  * </ol>
  *
- * <p>本版本<b>不伪造任何卡片数据</b>，只负责解锁判定 + 观测。
+ * <p>本模块做三件事：解锁流体云判定闸门、把白名单应用的通知注入成流体云卡片、
+ * 在关键节点打印探针日志。卡片字段契约来自对 OPPO 健康 6.9.40 的反编译。
  *
  * <h3>设计要点</h3>
  * <ul>
@@ -142,6 +143,44 @@ public final class FluidUnlockModule extends XposedModule {
         if (FORCE_COMPAT_TEMPLATE) {
             hookBool(cl, "com.heytap.health.watch.notification.impl.fluid.FluidConfigCenter",
                     "compatMode", "java.lang.String");
+        }
+
+        // 8) 震动档位：把 normalizeFluidBundle 硬写的“重要”盖回我们想要的档位
+        hookNotifyLevel(cl);
+    }
+
+    /**
+     * 震动档位。
+     *
+     * <p>{@code ExternalFluidCloudInjector.normalizeFluidBundle} 末尾会<b>无条件</b>
+     * {@code putInt("KEY_NOTIFY_LEVEL", 1)}（= 重要），于是同一个导航通知每刷新一次，
+     * 手表就震一下。这里在它返回之后再盖回去：
+     * 只处理我们自己注入的 bundle（带 {@link FluidInjector#NOTIFY_LEVEL_KEY} 标记），
+     * 原生卡片的档位一概不碰。
+     */
+    private void hookNotifyLevel(ClassLoader cl) {
+        final String cls = "com.heytap.health.watch.notification.impl.fluid.external"
+                + ".ExternalFluidCloudInjector";
+        try {
+            final Class<?> c = Class.forName(cls, false, cl);
+            final Method m = c.getDeclaredMethod("normalizeFluidBundle", Bundle.class, String.class);
+            m.setAccessible(true);
+            hook(m).intercept(chain -> {
+                final Object result = chain.proceed();
+                if (result instanceof Bundle) {
+                    final Bundle b = (Bundle) result;
+                    if (b.containsKey(FluidInjector.NOTIFY_LEVEL_KEY)) {
+                        final int level = b.getInt(FluidInjector.NOTIFY_LEVEL_KEY, 1);
+                        b.putInt("KEY_NOTIFY_LEVEL", level);
+                        logOnce("normalizeFluidBundle", "[GATE] KEY_NOTIFY_LEVEL -> " + level
+                                + " (injector would force 1)");
+                    }
+                }
+                return result;
+            });
+            log(Log.INFO, TAG, "hooked level : " + cls + "#normalizeFluidBundle");
+        } catch (Throwable t) {
+            logSoft("hookNotifyLevel", cls + "#normalizeFluidBundle", t);
         }
     }
 

@@ -2,13 +2,15 @@
 
 针对 **OPPO 健康（`com.heytap.health`）** 的 libxposed API 102 模块。
 
-它做两件事，且**只**做这两件事：
+它做三件事：
 
 1. **解锁闸门** —— 把流体云的环境判定方法强制返回“支持”，让 App 内部的流体云管线继续往下走；
-2. **输出探针日志** —— 在数据分发的关键节点打印日志，用来判断 App 自带白名单应用的数据究竟能不能流到「推送手表」这一步。
+2. **注入卡片** —— 把命中内置白名单的第三方通知（百度地图、高德、外卖…）经
+   `ExternalFluidCloudInjector` 组装成流体云卡片推给手表：标题 / 正文 / 图标 / 桌面距离方位指示窗；
+3. **输出探针日志** —— 在数据分发的关键节点打印日志，用于定位载荷、模板与能力判定问题。
 
-> 本版本**不伪造任何卡片数据**。日志里出现的数据全部来自 App 自身逻辑，可信度最高。
-> 目的是先验证通道，再谈自定义配置。
+> 原生链路对第三方通知**不产卡**（做过对照实验，见下文「卡片注入」），
+> 所以卡片内容必须由本模块自己组装；字段契约全部来自对 OPPO 健康 6.9.40 的反编译。
 
 ---
 
@@ -116,6 +118,32 @@ FluidConfigCenter.getSupportApp(dataSourcePkgName);   // null 就 return false
 
 `Bundle` 参数会被完整展开打印（字节数组只显示长度）。
 
+### 卡片注入（`[INJECT]` / `[BRIDGE]` 日志）
+
+原生链路对第三方 App 的通知**不产卡**（关掉伪造做过对照实验：`sendCardData` /
+`cloudPush` 一次都没命中），所以卡片内容由本模块自己组装，走
+`ExternalFluidCloudInjector.doInject(Bundle)` 这条官方外部注入通道。
+
+载荷按反编译出来的原生契约拼：
+
+| 键 | 说明 |
+|---|---|
+| `fluid_texts` | `level` + `text` + `color` + `bg_color` 列表。`B1` = 标题，`C1` = 正文，`B` = 桌面指示窗的距离文案 |
+| `fluid_images` | `level` + `bytes` 列表。`D1` = 卡片大图（数据源 App 图标），`A1` = 指示窗方位箭头（按通知里的方向词现画） |
+| `KEY_TYPES` | 模板名，固定 `center:compat`（镜像通知模板） |
+| `DEFAULT_C` | 必须写在 `fluid_data` **内部**，是旧协议 `oldPb` 的兜底正文 |
+| `B1` / `C1` / `B` | 旧协议扁平键，同时写一份，兼容走 `oldPb` 的世代 |
+| `ohealth_notify_level` | 自用标记，`normalizeFluidBundle` 无条件把 `KEY_NOTIFY_LEVEL` 写成 1，只能回包 hook 再盖回真实档位 |
+
+两个行为细节：
+
+- **桌面指示窗**（表盘上的距离/方位窗，`extractIndicatorValue` 只认
+  `A1` / `A` / `A0` 图与 `B` / `B0` 文本）：只有这五个槽位的内容变化，
+  卡片原型上的 `updateIndicator` 才会置 2 从而刷新指示窗。没有 `B` 层文本时
+  指示窗永远不更新，所以这里把「距离」写进 `B`，把「方向箭头」写进 `A1`。
+- **震动**：`KEY_NOTIFY_LEVEL` = 1 会让手表震一下。只在「卡片首次出现」与
+  「转向动作变化」（由方向词算出的指纹变化）时用 1，其余刷新一律 0。
+
 ---
 
 ## 三、构建
@@ -181,9 +209,12 @@ gradle assembleRelease
 
 ## 五、已知限制
 
-- **不保证手表以「流体云形态」渲染**。`onNotificationFluid` 确实把数据交给了 `NotificationEventManager` 推手表，但固件是否识别为流体云卡片、而非普通通知，取决于 `webp_md5`、`level` 层级、`KEY_TYPES` 等字段是否符合预期。这是唯一的黑盒，必须实机验证。
-- **不能凭空造出手机状态栏的流体云胶囊**。渲染与决策都在 ColorOS 的 `com.oplus.pantanal.ums` 平台侧，App 只是「服务方」。
-- **`ExternalFluidCloudReceiver` 是动态注册的**（`AndroidManifest.xml` 中搜不到），广播注入路线是否可用需实机确认。
+- **手表端才会渲染**。手机侧的流体云胶囊由 ColorOS 的 `com.oplus.pantanal.ums` 决定，App 只是服务方，本模块不碰手机状态栏。
+- **箭头是画的，不是原生资源**。原生导航卡的方位图标来自云端模板（webp），拿不到；这里按通知里的「左转/右转/掉头…」等方向词现画一个 120×120 的 PNG。文案里没有方向词时一律画成直行。
+- **距离靠正则抠**。指示窗的 `B` 层取通知文案里第一个「数字 + 米/公里」，取不到就不写该槽位（指示窗不显示距离，但卡片本身正常）。
+- **模板固定为 `center:compat`**。原生卡片的 `KEY_TYPES` 由云端模板节点拼出，第三方通知走镜像通知模板；若固件对某类应用要求专有模板，会退化成普通卡样式。
+- **`webp_md5` 未提供**。原生卡片支持 webp 动图，这里只发 PNG 静图。
+- **`ExternalFluidCloudReceiver` 是动态注册的**（`AndroidManifest.xml` 中搜不到），广播注入路线未采用。
 - 兼容 Android 14+ 的 LSPosed，需正确声明作用域。
 
 ---

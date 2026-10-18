@@ -37,6 +37,14 @@ final class NotificationBridge {
     private static final Set<String> INJECTED = new HashSet<>();
 
     /**
+     * 当前卡片的「转向节点」指纹：{@code pkg|id|tag → FluidInjector.maneuverKey(...)}。
+     *
+     * <p>导航通知刷新极其频繁（距离、剩余时间），每次都震会把人震麻。
+     * 只有指纹变化（= 换了个转向动作）才当作关键节点，让手表震一下。
+     */
+    private static final java.util.Map<String, Integer> MANEUVER = new java.util.HashMap<>();
+
+    /**
      * 是否把第三方通知伪造成卡片。
      *
      * <p>对照实验做过一轮（关掉伪造、只留闸门），原生链路对百度地图这类通知<b>完全不产卡</b>：
@@ -218,11 +226,33 @@ final class NotificationBridge {
         Log.i(TAG, "[BRIDGE] whitelisted notification: pkg=" + pkg + ", id=" + sbn.getId()
                 + ", title=" + title + ", text=" + body);
 
+        // 震动策略：只在「关键节点」震一下，而不是每次刷新都震。
+        //   1) 通知第一次出现（导航刚起步）→ 震；
+        //   2) 方向指令变了（进入下一个转向节点）→ 震；
+        //   其余仅距离/时间在变的刷新一律用「正常」档静默更新。
+        final String key = keyOf(sbn);
+        final boolean first = !isInjected(sbn);
+        final int maneuver = FluidInjector.maneuverKey(title, body);
+        boolean turnNode = false;
+        synchronized (MANEUVER) {
+            final Integer prev = MANEUVER.put(key, maneuver);
+            turnNode = prev != null && prev != maneuver;
+        }
+        final int notifyLevel = (first || turnNode) ? 1 : 0;
+
         // 卡片 id 沿用源通知 id：更新才是替换同一张卡，撤销也才找得到它
-        if (FluidInjector.inject(cl, pkg, title, body, 0, sbn.getId())) {
+        if (FluidInjector.inject(cl, pkg, title, body, 0, sbn.getId(), notifyLevel)) {
             synchronized (INJECTED) {
-                INJECTED.add(keyOf(sbn));
+                INJECTED.add(key);
             }
+            Log.i(TAG, "[BRIDGE] vibrate=" + (notifyLevel == 1)
+                    + " (first=" + first + ", turnNode=" + turnNode + ", maneuver=" + maneuver + ")");
+        }
+    }
+
+    private static boolean isInjected(StatusBarNotification sbn) {
+        synchronized (INJECTED) {
+            return INJECTED.contains(keyOf(sbn));
         }
     }
 
@@ -239,6 +269,9 @@ final class NotificationBridge {
         }
         synchronized (LAST_SIG) {
             LAST_SIG.remove(key);
+        }
+        synchronized (MANEUVER) {
+            MANEUVER.remove(key);
         }
         if (!ours) {
             return;

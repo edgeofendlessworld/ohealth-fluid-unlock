@@ -64,6 +64,23 @@ final class FluidInjector {
     private static final String LEVEL_SUBTITLE = "subTitle1";
 
     /**
+     * 桌面「流体指示窗」的文本槽位。
+     *
+     * <p>{@code ConverterWorker.extractIndicatorValue} 只认这五个槽位：
+     * 图片 {@code A1} / {@code A} / {@code A0}，文本 {@code B} / {@code B0}。
+     * 它们拼成的字符串一变，原型上的 {@code updateIndicator} 才会从 1 变 2（刷新桌面指示窗）。
+     */
+    private static final String LEVEL_INDICATOR = "B";
+
+    /**
+     * 自用标记：期望的 {@code KEY_NOTIFY_LEVEL}（0 = 正常/不震，1 = 重要/震）。
+     *
+     * <p>{@code normalizeFluidBundle} 会无条件把 {@code KEY_NOTIFY_LEVEL} 写成 1，
+     * 所以只能随 {@code fluid_data} 带一个自用键过去，由回包 hook 再写回真实值。
+     */
+    static final String NOTIFY_LEVEL_KEY = "ohealth_notify_level";
+
+    /**
      * 诊断模式：把「层级标签」撒进文本槽位，同一条通知发两张卡（两种模板各一张）。
      *
      * <p>手表拿到卡却不渲染时，靠猜字段效率极低。这里改成让卡自己回答：
@@ -122,15 +139,16 @@ final class FluidInjector {
      * @return 是否成功调用到 doInject
      */
     static boolean inject(ClassLoader cl, String pkg, String title, String text, int smallIconRes,
-                          int sbnId) {
+                          int sbnId, int notifyLevel) {
         if (!SLOT_PROBE) {
-            return injectOne(cl, pkg, title, text, null, 0, -1, sbnId);
+            return injectOne(cl, pkg, title, text, null, 0, -1, sbnId, notifyLevel);
         }
         // 诊断模式：每种模板各发一张，标题直接写模板名 + 配色，方便对着手表认卡
         boolean any = false;
         for (int i = 0; i < PROBE_TYPES.length; i++) {
             final int palette = PROBE_PALETTES[i % PROBE_PALETTES.length];
-            any |= injectOne(cl, pkg, title, text, PROBE_TYPES[i], i * 7919, palette, sbnId + i);
+            any |= injectOne(cl, pkg, title, text, PROBE_TYPES[i], i * 7919, palette, sbnId + i,
+                    notifyLevel);
         }
         return any;
     }
@@ -177,9 +195,11 @@ final class FluidInjector {
      * @param palette  诊断用文字颜色
      */
     private static boolean injectOne(ClassLoader cl, String pkg, String title, String text,
-                                     String probeType, int idOffset, int palette, int sbnId) {
+                                     String probeType, int idOffset, int palette, int sbnId,
+                                     int notifyLevel) {
         try {
-            final Bundle extras = buildExtras(cl, pkg, title, text, probeType, idOffset, palette, sbnId);
+            final Bundle extras = buildExtras(cl, pkg, title, text, probeType, idOffset, palette,
+                    sbnId, notifyLevel);
             if (extras == null) {
                 return false;
             }
@@ -215,7 +235,8 @@ final class FluidInjector {
      * </pre>
      */
     private static Bundle buildExtras(ClassLoader cl, String pkg, String title, String text,
-                                      String probeType, int idOffset, int palette, int sbnId) {
+                                      String probeType, int idOffset, int palette, int sbnId,
+                                      int notifyLevel) {
         final Bundle fluidData = new Bundle();
 
         // 诊断模式下标题写模板名 + 配色（W=白字 / R=红字），正文写占位词，
@@ -248,6 +269,22 @@ final class FluidInjector {
             }
         }
 
+        // ------------------------------------------------------------------
+        // 桌面「流体指示窗」（表盘上那条显示距离/方位的指示器）
+        //
+        // 依据 ConverterWorker.extractIndicatorValue：指示窗的内容**只**由五个槽位决定——
+        //     图片 A1 / A / A0   +   文本 B / B0
+        // 而且 isDuplicateFluidSeedingCard 拿这五个槽位拼成的字符串做对比：
+        //     isIndicatorElementChanged(...) 为 true → 给 proto 打 updateIndicator = 2
+        //     （手表据此刷新桌面指示窗）；否则恒为 1（只换卡片内容，不动指示窗）。
+        // 我们以前一个 B/B0 文本都没给，五个槽位全空 → 指示窗永远不刷新。
+        // 这里补上 B = 距离文案，A1 = 方向箭头（见下面的 fluid_images）。
+        // ------------------------------------------------------------------
+        final String indicator = probeType == null ? indicatorText(effTitle, effText) : "";
+        if (!indicator.isEmpty()) {
+            textItems.add(textItem(LEVEL_INDICATOR, indicator, palette));
+        }
+
         fluidData.putParcelableArrayList("fluid_texts", textItems);
 
         // ------------------------------------------------------------------
@@ -264,10 +301,16 @@ final class FluidInjector {
         // ------------------------------------------------------------------
         int imageCount = 0;
         final byte[] icon = appIconPng(pkg);
-        if (icon != null) {
+        // A1 同时也是桌面指示窗里的「方位」图标，这里放方向箭头而不是 App 图标
+        final byte[] arrow = probeType == null
+                ? turnArrowPng(effText.isEmpty() ? effTitle : effText)
+                : null;
+        if (icon != null || arrow != null) {
             final ArrayList<Bundle> imageItems = new ArrayList<>(2);
-            imageItems.add(imageItem("D1", icon));
-            imageItems.add(imageItem("A1", icon));
+            // D1：卡片里的大图，原生取自数据源 App 图标
+            imageItems.add(imageItem("D1", icon != null ? icon : arrow));
+            // A1：小图 / 指示窗箭头
+            imageItems.add(imageItem("A1", arrow != null ? arrow : icon));
             fluidData.putParcelableArrayList("fluid_images", imageItems);
             imageCount = imageItems.size();
         }
@@ -301,6 +344,16 @@ final class FluidInjector {
             fluidData.putString("probe_type_override", probeType);
         }
 
+        // 震动档位：normalizeFluidBundle 会**无条件**把 KEY_NOTIFY_LEVEL 覆盖成 1
+        // （= NOTIFY_IMPORTANT），于是每一次导航更新手表都震一下。
+        // 真正想要的档位放进 fluid_data 带过去，由 FluidUnlockModule 里
+        // normalizeFluidBundle 的回包 hook 再写回去。
+        fluidData.putInt(NOTIFY_LEVEL_KEY, notifyLevel);
+
+        // 档位改成「正常」后，卡片仍然要显示出来：commonPb 会读这个键并给
+        // 原型打上 forceShow。不加的话，静默更新有可能连卡都不弹。
+        fluidData.putBoolean("KEY_NOTIFY_FORCE_SHOW", true);
+
         // DEFAULT_C 必须放在 fluid_data **里面**：normalizeFluidBundle 是从
         // fluidData 里 getString("DEFAULT_C", "流体云样例") 读的，
         // 放在外层 extras 上等于没生效（日志里一直回落成"流体云样例"）。
@@ -322,6 +375,9 @@ final class FluidInjector {
             fluidData.putString("B", "B");
             fluidData.putString("C2", "C2");
             fluidData.putString("C3", "C3");
+        } else if (!indicator.isEmpty()) {
+            // 走 oldPb 的世代里 B 就是顶部文本，指示窗也从这里取距离
+            fluidData.putString("B", indicator);
         }
 
         final Bundle extras = new Bundle();
@@ -337,9 +393,11 @@ final class FluidInjector {
 
         Log.i(TAG, "[INJECT] extras: pkg=" + pkg + ", id=" + (sbnId + idOffset)
                 + ", texts=" + textItems.size()
-                + " (" + LEVEL_TITLE + "=" + effTitle + ", " + LEVEL_CONTENT + "=" + effText + ")"
-                + ", images=" + imageCount + (imageCount == 0 ? " (缺少图标!)" : " (D1+A1)")
-                + ", KEY_TYPES=center:compat, legacy B1/C1 + DEFAULT_C in fluid_data"
+                + " (" + LEVEL_TITLE + "=" + effTitle + ", " + LEVEL_CONTENT + "=" + effText
+                + (indicator.isEmpty() ? "" : ", " + LEVEL_INDICATOR + "=" + indicator) + ")"
+                + ", images=" + imageCount + (imageCount == 0 ? " (缺少图标!)" : " (D1+A1 箭头)")
+                + ", KEY_TYPES=center:compat, notifyLevel=" + notifyLevel
+                + ", legacy B1/C1 + DEFAULT_C in fluid_data"
                 + (probeType == null ? "" : ", probe_type_override=" + probeType + ", palette=" + paletteTag));
 
         return extras;
@@ -370,6 +428,132 @@ final class FluidInjector {
         item.putByteArray("bytes", bytes);
         item.putBoolean("square", false);
         return item;
+    }
+
+    /**
+     * 抠出桌面指示窗要显示的文本：优先「距离」（如 {@code 300米}），没有距离就退化成方向词
+     * （如 {@code 左转}）。
+     *
+     * <p>指示窗只有一个文本槽位（{@code B}），放距离比放整句话更接近原生：
+     * 原生导航卡的 B 层就是剩余距离，方位交给 A1/A 的箭头图表达。
+     * 很多导航通知只在文案里偶尔出现距离，所以这里保留方向词兜底 —— 至少让指示窗
+     * 随转向变化，而不是永远一片空白。
+     */
+    private static String indicatorText(String title, String text) {
+        final String all = (title == null ? "" : title) + " " + (text == null ? "" : text);
+        final java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("([0-9]+(?:\\.[0-9]+)?)\\s*(公里|千米|米|km|KM|m)")
+                .matcher(all);
+        if (m.find()) {
+            String unit = m.group(2);
+            if ("km".equalsIgnoreCase(unit) || "千米".equals(unit)) {
+                unit = "公里";
+            } else if ("m".equals(unit)) {
+                unit = "米";
+            }
+            return m.group(1) + unit;
+        }
+        return turnLabel(all);
+    }
+
+    /** 文案里的转向词（找不到返回空串），既做指示窗兜底文本，也做「关键节点」判定的可读名。 */
+    private static String turnLabel(String text) {
+        if (text == null) {
+            return "";
+        }
+        final String[] labels = {
+                "左前方", "右前方", "左后方", "右后方",
+                "左转", "右转", "掉头", "调头",
+                "直行", "直走", "向左", "向右",
+        };
+        for (String label : labels) {
+            if (text.contains(label)) {
+                return label;
+            }
+        }
+        return "";
+    }
+
+    /** 方向关键词 → 箭头旋转角度（0 = 向上直行，正数顺时针）。 */
+    private static int turnAngle(String text) {
+        if (text == null) {
+            return 0;
+        }
+        if (text.contains("左前方") || text.contains("左前")) {
+            return -45;
+        }
+        if (text.contains("右前方") || text.contains("右前")) {
+            return 45;
+        }
+        if (text.contains("左后方") || text.contains("左后")) {
+            return -135;
+        }
+        if (text.contains("右后方") || text.contains("右后")) {
+            return 135;
+        }
+        if (text.contains("左转") || text.contains("向左")) {
+            return -90;
+        }
+        if (text.contains("右转") || text.contains("向右")) {
+            return 90;
+        }
+        if (text.contains("掉头") || text.contains("调头")) {
+            return 180;
+        }
+        return 0;
+    }
+
+    /**
+     * 「关键节点」判定用的指纹：方向变了才算进入下一个转向节点。
+     *
+     * <p>{@code NotificationBridge} 用它决定要不要让手表震一下——
+     * 导航中每更新一次距离/剩余时间都很频繁，只有转向指令变化才是该提醒的节点。
+     */
+    static int maneuverKey(String title, String text) {
+        return turnAngle((title == null ? "" : title) + " " + (text == null ? "" : text));
+    }
+
+    /**
+     * 画一张方向箭头 PNG，给桌面指示窗当「方位」图标（{@code A1} 层）。
+     *
+     * <p>原生导航卡的箭头来自云端模板（webp 资源），我们拿不到，所以按通知里的
+     * 方向词自己画一个：直行 / 左转 / 右转 / 左前右前 / 掉头。
+     * 尺寸取 120，与 {@code getDefaultImageBean} 里原生的图标宽度一致。
+     */
+    private static byte[] turnArrowPng(String text) {
+        try {
+            final int size = 120;
+            final android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(
+                    size, size, android.graphics.Bitmap.Config.ARGB_8888);
+            final android.graphics.Canvas canvas = new android.graphics.Canvas(bmp);
+            canvas.drawColor(0x00000000);
+            canvas.save();
+            canvas.rotate(turnAngle(text), size / 2f, size / 2f);
+
+            final android.graphics.Paint paint = new android.graphics.Paint();
+            paint.setAntiAlias(true);
+            paint.setColor(0xFFFFFFFF);
+            paint.setStyle(android.graphics.Paint.Style.FILL);
+
+            final float cx = size / 2f;
+            // 箭头杆
+            canvas.drawRect(cx - 9f, size * 0.40f, cx + 9f, size * 0.85f, paint);
+            // 箭头头
+            final android.graphics.Path head = new android.graphics.Path();
+            head.moveTo(cx, size * 0.12f);
+            head.lineTo(cx + 26f, size * 0.44f);
+            head.lineTo(cx - 26f, size * 0.44f);
+            head.close();
+            canvas.drawPath(head, paint);
+            canvas.restore();
+
+            final java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out);
+            return out.toByteArray();
+        } catch (Throwable t) {
+            Log.w(TAG, "[INJECT] arrow failed: " + t.getClass().getSimpleName());
+            return null;
+        }
     }
 
     /**
