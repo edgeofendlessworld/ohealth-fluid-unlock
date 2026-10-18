@@ -83,7 +83,8 @@ final class FluidProbe {
 
         // 2) 新旧协议的填充点
         observe(cl, xp, CONVERTER, "convertFluidNew", BEAN, "android.os.Bundle", PARSED_BUILDER);
-        observe(cl, xp, CONVERTER, "newPb", BEAN, "android.os.Bundle", SEEDING_BUILDER);
+        // newPb 需要「观测 + 改写 type」，所以用专用实现而不是通用的只读 observe
+        assertCompatType(cl, xp);
         observe(cl, xp, CONVERTER, "oldPb", "android.os.Bundle", SEEDING_BUILDER);
 
         // 3) 静默去重：重复卡片会被直接丢弃，是「什么都没有」的常见原因
@@ -97,6 +98,64 @@ final class FluidProbe {
         observe(cl, xp, CLOUD_PUSH, "cloudPush", BEAN);
 
         log("[PROBE] install() done");
+    }
+
+    /** {@code "center:compat"}：把一条普通通知镜像成卡片的模板，对字段要求最少。 */
+    private static final String COMPAT_TYPE = "center:compat";
+
+    /**
+     * 观测 {@code ConverterWorker#newPb}，并把它在 builder 上设好的 {@code type} 改成
+     * {@code center:compat}。
+     *
+     * <p>为什么在返回之后改：{@code newPb} 自己按
+     * {@code isNewPbFieldCompat() && compatMode(pkg)} 选模板，缺 {@code KEY_TYPES} 时落到
+     * {@code center:common}。这里不跟那两个开关周旋，直接在 builder 上覆盖 ——
+     * {@code type} 只是 builder 的一个字段，后面 {@code commonPb}/{@code build()} 都不会重设它。
+     */
+    private static void assertCompatType(ClassLoader cl, XposedInterface xp) {
+        try {
+            final Class<?> cls = Class.forName(CONVERTER, false, cl);
+            final Method m = findMethod(cls, "newPb", cl, BEAN, "android.os.Bundle", SEEDING_BUILDER);
+            if (m == null) {
+                log("[PROBE] SKIP ConverterWorker#newPb");
+                return;
+            }
+            m.setAccessible(true);
+
+            xp.hook(m).intercept(chain -> {
+                final Object result = chain.proceed();
+                Object builder = null;
+                for (Object a : chain.getArgs()) {
+                    if (a != null && a.getClass().getName().contains("SeedingCardStyleProto$Builder")) {
+                        builder = a;
+                    }
+                }
+                String before = null;
+                if (builder != null) {
+                    before = callString(builder, "getType");
+                    if (!COMPAT_TYPE.equals(before)) {
+                        setType(builder, COMPAT_TYPE);
+                    }
+                }
+                log("[PROBE] ConverterWorker#newPb | " + summarize(builder)
+                        + " | type " + before + " -> " + COMPAT_TYPE);
+                return result;
+            });
+            log("[PROBE] installed : ConverterWorker#newPb (with type override)");
+        } catch (Throwable t) {
+            log("[PROBE] SKIP ConverterWorker#newPb: "
+                    + t.getClass().getSimpleName() + " " + t.getMessage());
+        }
+    }
+
+    private static void setType(Object builder, String type) {
+        try {
+            final Method m = builder.getClass().getMethod("setType", String.class);
+            m.setAccessible(true);
+            m.invoke(builder, type);
+        } catch (Throwable t) {
+            log("[PROBE] setType failed: " + t.getClass().getSimpleName());
+        }
     }
 
     /**
